@@ -17,6 +17,34 @@ function dateToNl(isoDate) {
   return `${d}-${m}-${y}`
 }
 
+async function validateOvereenkomst({ ent, selKlant, selProj, selMons }) {
+  const tb = selKlant.tekenbevoegden.find(t => t.id === selProj.tb_id) || selKlant.tekenbevoegden[0] || { naam: '' }
+
+  const payload = {
+    entiteit: ent,
+    monteurs: selMons.map(m => ({
+      id: m.id, naam: m.naam, handelsnaam: m.handelsnaam, kvk: m.kvk,
+      adres: m.adres || '', persnr: getPersnr(m, ent),
+    })),
+    klant: { naam: selKlant.naam, adres: selKlant.adres, kvk: selKlant.kvk },
+    project: { nr: selProj.nr, naam: selProj.naam || '', werkadres: selProj.werkadres || '' },
+    tekenbevoegde: tb.naam,
+    opdrachtomschrijving: selProj.omschr || '',
+  }
+
+  try {
+    const res = await fetch(`${API_URL}/validate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!res.ok) return { compleet: true, ontbrekend: [] } // bij serverfout niet blokkeren
+    return await res.json()
+  } catch (e) {
+    return { compleet: true, ontbrekend: [] } // bij netwerkfout niet blokkeren, /generate vangt het alsnog op
+  }
+}
+
 async function downloadOvereenkomsten({ ent, selKlant, selProj, selMons, form, tarieven, toast }) {
   const persoonsnummerVoorMonteur = (m) => getPersnr(m, ent)
 
@@ -203,11 +231,92 @@ function NieuweOvereenkomst({ db, save, toast }) {
   const [persnrModal, setPersnrModal] = useState(null) // monteur waarvoor persnr ontbreekt
   const [persnrInput, setPersnrInput] = useState('')
   const [downloading, setDownloading] = useState(false)
+  const [ontbrekendModal, setOntbrekendModal] = useState(null) // lijst ontbrekende velden
+  const [ontbrekendInputs, setOntbrekendInputs] = useState({}) // ingevulde aanvullingen
   const topRef = useRef(null)
 
   async function handleDownload() {
     setDownloading(true)
+    const result = await validateOvereenkomst({ ent, selKlant, selProj, selMons })
+    if (!result.compleet && result.ontbrekend.length > 0) {
+      setDownloading(false)
+      setOntbrekendModal(result.ontbrekend)
+      setOntbrekendInputs({})
+      return
+    }
     await downloadOvereenkomsten({ ent, selKlant, selProj, selMons, form, tarieven, toast })
+    setDownloading(false)
+  }
+
+  // Sla de door de gebruiker aangevulde ontbrekende velden permanent op in het
+  // klant-/project-/monteurprofiel, zodat ze de volgende keer niet meer gevraagd worden.
+  async function saveOntbrekendAanvullingen() {
+    let newDb = { ...db }
+    let updatedKlant = selKlant
+    let updatedProj = selProj
+    const updatedMons = [...selMons]
+
+    ontbrekendModal.forEach(item => {
+      const waarde = (ontbrekendInputs[item.veld + '_' + (item.monteur_id || '')] || '').trim()
+      if (!waarde) return
+
+      if (item.veld === 'tekenbevoegde') {
+        // Voeg toe als nieuwe tekenbevoegde aan de klant, en koppel aan het huidige project
+        const nieuweTb = { id: uid(), naam: waarde, functie: 'Tekenbevoegde' }
+        const klanten = newDb.klanten.map(k => {
+          if (k.id !== selKlant.id) return k
+          const tekenbevoegden = [...k.tekenbevoegden, nieuweTb]
+          const projecten = k.projecten.map(p => p.id === selProj.id ? { ...p, tb_id: nieuweTb.id } : p)
+          return { ...k, tekenbevoegden, projecten }
+        })
+        newDb = { ...newDb, klanten }
+        updatedKlant = klanten.find(k => k.id === selKlant.id)
+        updatedProj = updatedKlant.projecten.find(p => p.id === selProj.id)
+      } else if (item.veld.startsWith('klant.')) {
+        const field = item.veld.split('.')[1]
+        const klanten = newDb.klanten.map(k => k.id === selKlant.id ? { ...k, [field]: waarde } : k)
+        newDb = { ...newDb, klanten }
+        updatedKlant = klanten.find(k => k.id === selKlant.id)
+      } else if (item.veld.startsWith('project.')) {
+        const field = item.veld.split('.')[1]
+        const klanten = newDb.klanten.map(k => {
+          if (k.id !== selKlant.id) return k
+          const projecten = k.projecten.map(p => p.id === selProj.id ? { ...p, [field]: waarde } : p)
+          return { ...k, projecten }
+        })
+        newDb = { ...newDb, klanten }
+        updatedKlant = klanten.find(k => k.id === selKlant.id)
+        updatedProj = updatedKlant.projecten.find(p => p.id === selProj.id)
+      } else if (item.veld === 'opdrachtomschrijving') {
+        const klanten = newDb.klanten.map(k => {
+          if (k.id !== selKlant.id) return k
+          const projecten = k.projecten.map(p => p.id === selProj.id ? { ...p, omschr: waarde } : p)
+          return { ...k, projecten }
+        })
+        newDb = { ...newDb, klanten }
+        updatedKlant = klanten.find(k => k.id === selKlant.id)
+        updatedProj = updatedKlant.projecten.find(p => p.id === selProj.id)
+        setForm(f => ({ ...f, omschr: waarde }))
+      } else if (item.veld.startsWith('monteur.')) {
+        const field = item.veld.split('.')[1]
+        const targetField = field === 'persnr' ? (ent === 'west' ? 'persnr_west' : 'persnr_nl') : field
+        const monteurs = newDb.monteurs.map(m => m.id === item.monteur_id ? { ...m, [targetField]: waarde } : m)
+        newDb = { ...newDb, monteurs }
+        const idx = updatedMons.findIndex(m => m.id === item.monteur_id)
+        if (idx >= 0) updatedMons[idx] = monteurs.find(m => m.id === item.monteur_id)
+      }
+    })
+
+    save(newDb)
+    setSelKlant(updatedKlant)
+    setSelProj(updatedProj)
+    setSelMons(updatedMons)
+    setOntbrekendModal(null)
+    toast('Aanvullingen opgeslagen — overeenkomsten worden gegenereerd...')
+
+    // Probeer de download direct opnieuw met de aangevulde gegevens
+    setDownloading(true)
+    await downloadOvereenkomsten({ ent, selKlant: updatedKlant, selProj: updatedProj, selMons: updatedMons, form, tarieven, toast })
     setDownloading(false)
   }
 
@@ -486,6 +595,35 @@ function NieuweOvereenkomst({ db, save, toast }) {
             <div className="modal-footer">
               <button className="btn btn-sm" onClick={() => setPersnrModal(null)}>Annuleren</button>
               <button className="btn btn-primary btn-sm" onClick={savePersnr} disabled={!persnrInput.trim()}>Opslaan & doorgaan</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {ontbrekendModal && (
+        <div className="modal-bg">
+          <div className="modal">
+            <div className="modal-title">⚠ Niet alle gegevens zijn bekend</div>
+            <p style={{ fontSize: 13, color: '#555', marginBottom: 14 }}>
+              Voor een volledig ingevulde overeenkomst ontbreken nog {ontbrekendModal.length === 1 ? 'de volgende gegeven' : 'de volgende gegevens'}.
+              Wat je hier invult wordt automatisch onthouden — de volgende keer hoef je dit niet opnieuw in te vullen.
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 360, overflowY: 'auto' }}>
+              {ontbrekendModal.map((item, i) => {
+                const key = item.veld + '_' + (item.monteur_id || '')
+                return (
+                  <div key={i} className="fg">
+                    <label className="flbl">{item.label} {item.context && <span style={{ fontWeight: 400, color: '#999' }}>— {item.context}</span>}</label>
+                    <input className="finput" value={ontbrekendInputs[key] || ''}
+                      onChange={ev => setOntbrekendInputs(p => ({ ...p, [key]: ev.target.value }))}
+                      placeholder={item.label} autoFocus={i === 0} />
+                  </div>
+                )
+              })}
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-sm" onClick={() => setOntbrekendModal(null)}>Annuleren</button>
+              <button className="btn btn-primary btn-sm" onClick={saveOntbrekendAanvullingen}>Opslaan & doorgaan</button>
             </div>
           </div>
         </div>
