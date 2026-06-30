@@ -8,7 +8,7 @@ const ENTS = {
 }
 
 // Backend API voor het genereren van Word/PDF overeenkomsten (Render)
-const API_URL = 'https://gto-projectovereenkomsten.onrender.com'
+const API_URL = 'https://gto-overeenkomsten-backend.onrender.com'
 
 // Converteer NL datumformaat (DD-MM-JJJJ uit form.start) naar de twee formaten die de backend nodig heeft
 function dateToNl(isoDate) {
