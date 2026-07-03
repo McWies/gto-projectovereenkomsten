@@ -222,18 +222,612 @@ function NieuweOvereenkomst({ db, save, toast }) {
   const [selKlant, setSelKlant] = useState(null)
   const [selProj, setSelProj] = useState(null)
   const [selMons, setSelMons] = useState([])
-  const [prevMon, setPrevMon] = useState(null)
   const [form, setForm] = useState({ start: '', signdate: '', omschr: '' })
   const [tarieven, setTarieven] = useState({})
-  const [docTab, setDocTab] = useState('zzp')
   const [zoekKlant, setZoekKlant] = useState('')
   const [zoekMon, setZoekMon] = useState('')
-  const [persnrModal, setPersnrModal] = useState(null) // monteur waarvoor persnr ontbreekt
-  const [persnrInput, setPersnrInput] = useState('')
   const [downloading, setDownloading] = useState(false)
-  const [ontbrekendModal, setOntbrekendModal] = useState(null) // lijst ontbrekende velden
-  const [ontbrekendInputs, setOntbrekendInputs] = useState({}) // ingevulde aanvullingen
+  const [ontbrekendModal, setOntbrekendModal] = useState(null)
+  const [ontbrekendInputs, setOntbrekendInputs] = useState({})
+  const [nieuwProjModal, setNieuwProjModal] = useState(false)
+  const [nieuwProjForm, setNieuwProjForm] = useState({ nr: '', naam: '', werkadres: '', omschr: '', tb_id: '' })
+  const [tbDropdownOpen, setTbDropdownOpen] = useState(false)
+  const [nieuwTbInput, setNieuwTbInput] = useState('')
+  const [nieuwTbMode, setNieuwTbMode] = useState(false)
+  // Bewerkbaar overzicht state — gespiegeld vanuit selKlant/selProj/selMons
+  const [overzicht, setOverzicht] = useState(null)
   const topRef = useRef(null)
+
+  const e = ENTS[ent]
+
+  function scrollTop() { topRef.current?.scrollIntoView({ behavior: 'smooth' }) }
+  function goStep(n) { setStep(n); scrollTop() }
+
+  function pickKlant(k) {
+    const fresh = db.klanten.find(x => x.id === k.id) || k
+    setSelKlant(fresh); setSelProj(null)
+  }
+  function pickProj(p) {
+    setSelProj(p)
+    setForm(f => ({ ...f, omschr: p.omschr || '' }))
+  }
+  function toggleMon(m) {
+    setSelMons(prev => prev.find(x => x.id === m.id) ? prev.filter(x => x.id !== m.id) : [...prev, m])
+  }
+  function setTarief(monId, field, val) { setTarieven(t => ({ ...t, [`${monId}_${field}`]: val })) }
+
+  // ── Nieuw project aanmaken vanuit stap 2 ──────────────────────────────────
+  function openNieuwProj() {
+    setNieuwProjForm({ nr: '', naam: '', werkadres: '', omschr: '', tb_id: selKlant?.tekenbevoegden[0]?.id || '' })
+    setNieuwProjModal(true)
+  }
+  function saveNieuwProj() {
+    if (!nieuwProjForm.nr || !nieuwProjForm.naam) return
+    const nieuwProj = { ...nieuwProjForm, id: uid(), tb_id: parseInt(nieuwProjForm.tb_id) || nieuwProjForm.tb_id }
+    const klanten = db.klanten.map(k => k.id === selKlant.id ? { ...k, projecten: [...k.projecten, nieuwProj] } : k)
+    const newDb = { ...db, klanten }
+    save(newDb)
+    const updatedKlant = klanten.find(k => k.id === selKlant.id)
+    setSelKlant(updatedKlant)
+    pickProj(nieuwProj)
+    setNieuwProjModal(false)
+    toast('Project aangemaakt en geselecteerd')
+  }
+
+  // ── Persoonsnummer bij monteur direct opslaan ──────────────────────────────
+  function savePersnrInOverzicht(monId, waarde) {
+    if (!waarde.trim()) return
+    const nr = waarde.trim()
+    const field = ent === 'west' ? 'persnr_west' : 'persnr_nl'
+    const monteurs = db.monteurs.map(m => m.id === monId ? { ...m, [field]: nr, persnr: nr } : m)
+    save({ ...db, monteurs })
+    setSelMons(prev => prev.map(m => m.id === monId ? { ...m, [field]: nr, persnr: nr } : m))
+    if (overzicht) {
+      setOverzicht(ov => ({ ...ov, monteurs: ov.monteurs.map(m => m.id === monId ? { ...m, [field]: nr, persnr: nr } : m) }))
+    }
+  }
+
+  // ── Stap 4 → 5: bouw bewerkbaar overzicht ─────────────────────────────────
+  function buildOverzicht() {
+    const tb = selKlant.tekenbevoegden.find(t => t.id === selProj.tb_id) || selKlant.tekenbevoegden[0] || null
+    setOverzicht({
+      entiteit: ent,
+      klant: { ...selKlant },
+      project: { ...selProj },
+      tekenbevoegde: tb ? { ...tb } : null,
+      monteurs: selMons.map(m => ({ ...m })),
+      startdatum: form.start,
+      signdate: form.signdate,
+      omschr: form.omschr || selProj.omschr || '',
+      tarieven: { ...tarieven },
+    })
+    goStep(5)
+  }
+
+  // ── Overzicht: sla gewijzigd veld op én in profiel ────────────────────────
+  function updateOv(path, value) {
+    setOverzicht(ov => {
+      const parts = path.split('.')
+      if (parts.length === 1) return { ...ov, [parts[0]]: value }
+      if (parts.length === 2) return { ...ov, [parts[0]]: { ...ov[parts[0]], [parts[1]]: value } }
+      if (parts[0] === 'monteur') {
+        const [, monId, field] = parts
+        return { ...ov, monteurs: ov.monteurs.map(m => m.id === parseInt(monId) ? { ...m, [field]: value } : m) }
+      }
+      return ov
+    })
+  }
+
+  function syncOverzichtNaarDb() {
+    if (!overzicht) return { newDb: db, updatedKlant: selKlant, updatedProj: selProj, updatedMons: selMons }
+    let newDb = { ...db }
+
+    // Sync klant
+    const klantUpdates = {}
+    const klantVelden = ['naam','adres','kvk','btw','contact','fmail','betaling','opzeg']
+    klantVelden.forEach(f => { if (overzicht.klant[f] !== undefined) klantUpdates[f] = overzicht.klant[f] })
+    let klanten = newDb.klanten.map(k => k.id === selKlant.id ? { ...k, ...klantUpdates } : k)
+
+    // Sync project
+    const projUpdates = { naam: overzicht.project.naam, nr: overzicht.project.nr, werkadres: overzicht.project.werkadres, omschr: overzicht.omschr }
+    if (overzicht.tekenbevoegde) projUpdates.tb_id = overzicht.tekenbevoegde.id
+    klanten = klanten.map(k => {
+      if (k.id !== selKlant.id) return k
+      const projecten = k.projecten.map(p => p.id === selProj.id ? { ...p, ...projUpdates } : p)
+      return { ...k, projecten }
+    })
+
+    // Sync tekenbevoegde (nieuw of bestaand)
+    if (overzicht.tekenbevoegde && !selKlant.tekenbevoegden.find(t => t.id === overzicht.tekenbevoegde.id)) {
+      klanten = klanten.map(k => {
+        if (k.id !== selKlant.id) return k
+        const tekenbevoegden = [...k.tekenbevoegden, overzicht.tekenbevoegde]
+        const projecten = k.projecten.map(p => p.id === selProj.id ? { ...p, tb_id: overzicht.tekenbevoegde.id } : p)
+        return { ...k, tekenbevoegden, projecten }
+      })
+    }
+
+    // Sync monteurs
+    let monteurs = newDb.monteurs
+    overzicht.monteurs.forEach(om => {
+      monteurs = monteurs.map(m => {
+        if (m.id !== om.id) return m
+        const persnrField = ent === 'west' ? 'persnr_west' : 'persnr_nl'
+        return { ...m, naam: om.naam, handelsnaam: om.handelsnaam, kvk: om.kvk, adres: om.adres, [persnrField]: om.persnr || getPersnr(om, ent) }
+      })
+    })
+
+    newDb = { ...newDb, klanten, monteurs }
+    const updatedKlant = klanten.find(k => k.id === selKlant.id)
+    const updatedProj = updatedKlant?.projecten.find(p => p.id === selProj.id)
+    const updatedMons = overzicht.monteurs.map(om => monteurs.find(m => m.id === om.id) || om)
+
+    save(newDb)
+    setSelKlant(updatedKlant)
+    setSelProj(updatedProj)
+    setSelMons(updatedMons)
+
+    return { newDb, updatedKlant, updatedProj, updatedMons }
+  }
+
+  // ── Tekenbevoegde koppelen via dropdown ───────────────────────────────────
+  function kiesTekenbevoegde(tb) {
+    updateOv('tekenbevoegde', tb)
+    setTbDropdownOpen(false)
+    setNieuwTbMode(false)
+  }
+  function voegNieuweTbToe() {
+    if (!nieuwTbInput.trim()) return
+    const nieuwTb = { id: uid(), naam: nieuwTbInput.trim(), functie: 'Tekenbevoegde' }
+    // Voeg meteen toe aan de klant in db
+    const klanten = db.klanten.map(k => k.id === selKlant.id ? { ...k, tekenbevoegden: [...k.tekenbevoegden, nieuwTb] } : k)
+    save({ ...db, klanten })
+    setSelKlant(klanten.find(k => k.id === selKlant.id))
+    kiesTekenbevoegde(nieuwTb)
+    setNieuwTbInput('')
+  }
+
+  // ── Download ──────────────────────────────────────────────────────────────
+  async function handleDownload() {
+    const { updatedKlant, updatedProj, updatedMons } = syncOverzichtNaarDb()
+    setDownloading(true)
+    const updatedSelKlant = updatedKlant || selKlant
+    const updatedSelProj = updatedProj || selProj
+    const updatedSelMons = updatedMons || selMons
+    const updatedForm = { ...form, omschr: overzicht?.omschr || form.omschr, start: overzicht?.startdatum || form.start, signdate: overzicht?.signdate || form.signdate }
+    const updatedTarieven = overzicht?.tarieven || tarieven
+
+    const result = await validateOvereenkomst({ ent, selKlant: updatedSelKlant, selProj: updatedSelProj, selMons: updatedSelMons })
+    if (!result.compleet && result.ontbrekend.length > 0) {
+      setDownloading(false)
+      setOntbrekendModal(result.ontbrekend)
+      setOntbrekendInputs({})
+      return
+    }
+    await downloadOvereenkomsten({ ent, selKlant: updatedSelKlant, selProj: updatedSelProj, selMons: updatedSelMons, form: updatedForm, tarieven: updatedTarieven, toast })
+    setDownloading(false)
+    toast('Download gestart')
+  }
+
+  async function saveOntbrekendAanvullingen() {
+    let newDb = { ...db }
+    let updatedKlant = selKlant
+    let updatedProj = selProj
+    const updatedMons = [...selMons]
+    ontbrekendModal.forEach(item => {
+      const waarde = (ontbrekendInputs[item.veld + '_' + (item.monteur_id || '')] || '').trim()
+      if (!waarde) return
+      if (item.veld === 'tekenbevoegde') {
+        const nieuweTb = { id: uid(), naam: waarde, functie: 'Tekenbevoegde' }
+        const klanten = newDb.klanten.map(k => {
+          if (k.id !== selKlant.id) return k
+          const tekenbevoegden = [...k.tekenbevoegden, nieuweTb]
+          const projecten = k.projecten.map(p => p.id === selProj.id ? { ...p, tb_id: nieuweTb.id } : p)
+          return { ...k, tekenbevoegden, projecten }
+        })
+        newDb = { ...newDb, klanten }
+        updatedKlant = klanten.find(k => k.id === selKlant.id)
+        updatedProj = updatedKlant.projecten.find(p => p.id === selProj.id)
+      } else if (item.veld.startsWith('klant.')) {
+        const field = item.veld.split('.')[1]
+        const klanten = newDb.klanten.map(k => k.id === selKlant.id ? { ...k, [field]: waarde } : k)
+        newDb = { ...newDb, klanten }; updatedKlant = klanten.find(k => k.id === selKlant.id)
+      } else if (item.veld.startsWith('project.')) {
+        const field = item.veld.split('.')[1]
+        const klanten = newDb.klanten.map(k => { if (k.id !== selKlant.id) return k; const projecten = k.projecten.map(p => p.id === selProj.id ? { ...p, [field]: waarde } : p); return { ...k, projecten } })
+        newDb = { ...newDb, klanten }; updatedKlant = klanten.find(k => k.id === selKlant.id); updatedProj = updatedKlant.projecten.find(p => p.id === selProj.id)
+      } else if (item.veld === 'opdrachtomschrijving') {
+        const klanten = newDb.klanten.map(k => { if (k.id !== selKlant.id) return k; const projecten = k.projecten.map(p => p.id === selProj.id ? { ...p, omschr: waarde } : p); return { ...k, projecten } })
+        newDb = { ...newDb, klanten }; updatedKlant = klanten.find(k => k.id === selKlant.id); updatedProj = updatedKlant.projecten.find(p => p.id === selProj.id)
+        setForm(f => ({ ...f, omschr: waarde }))
+      } else if (item.veld.startsWith('monteur.')) {
+        const field = item.veld.split('.')[1]
+        const tf = field === 'persnr' ? (ent === 'west' ? 'persnr_west' : 'persnr_nl') : field
+        const monteurs = newDb.monteurs.map(m => m.id === item.monteur_id ? { ...m, [tf]: waarde } : m)
+        newDb = { ...newDb, monteurs }
+        const idx = updatedMons.findIndex(m => m.id === item.monteur_id)
+        if (idx >= 0) updatedMons[idx] = monteurs.find(m => m.id === item.monteur_id)
+      }
+    })
+    save(newDb); setSelKlant(updatedKlant); setSelProj(updatedProj); setSelMons(updatedMons)
+    setOntbrekendModal(null)
+    toast('Aanvullingen opgeslagen — overeenkomsten worden gegenereerd...')
+    setDownloading(true)
+    await downloadOvereenkomsten({ ent, selKlant: updatedKlant, selProj: updatedProj, selMons: updatedMons, form, tarieven, toast })
+    setDownloading(false)
+  }
+
+  const filteredKlanten = db.klanten.filter(k => k.naam.toLowerCase().includes(zoekKlant.toLowerCase()))
+  const filteredMons = db.monteurs.filter(m => m.naam.toLowerCase().includes(zoekMon.toLowerCase()) || (m.handelsnaam || '').toLowerCase().includes(zoekMon.toLowerCase()))
+
+  function NavRow({ back, next, nextDisabled, nextLabel }) {
+    return (
+      <div className="nav-row">
+        {back ? <button className="btn btn-sm" onClick={() => goStep(back)}>← Terug</button> : <span />}
+        {next && <button className="btn btn-primary btn-sm" onClick={() => goStep(next)} disabled={nextDisabled}>{nextLabel || 'Volgende'} →</button>}
+      </div>
+    )
+  }
+
+  // ── Bewerkbaar veld component ─────────────────────────────────────────────
+  function EditField({ label, value, onChange, multiline, placeholder }) {
+    return (
+      <div className="ov-field">
+        <div className="ov-label">{label}</div>
+        {multiline
+          ? <textarea className="finput ov-input" rows={2} value={value || ''} onChange={ev => onChange(ev.target.value)} placeholder={placeholder || label} />
+          : <input className="finput ov-input" value={value || ''} onChange={ev => onChange(ev.target.value)} placeholder={placeholder || label} />
+        }
+      </div>
+    )
+  }
+
+  return (
+    <div>
+      <div ref={topRef} />
+
+      {/* STEP BAR */}
+      <div className="step-bar">
+        {['Entiteit','Klant & project','Monteurs','Tarieven & datum','Overzicht & download'].map((lbl, i) => (
+          <div key={i} className={`step ${step > i+1 ? 'done clickable' : step === i+1 ? 'active' : ''}`}
+               onClick={() => { if (step > i+1) goStep(i+1) }}>
+            <div className="step-num">{step > i+1 ? '✓' : i+1}</div>
+            <div className="step-lbl">{lbl}</div>
+            {i < 4 && <div className="step-line" />}
+          </div>
+        ))}
+      </div>
+
+      {/* STAP 1 */}
+      {step === 1 && (
+        <div className="card">
+          <div className="card-hdr">Kies entiteit</div>
+          <NavRow next={2} />
+          <div className="ent-toggle" style={{ margin: '12px 0' }}>
+            <button className={`ent-btn ${ent === 'nl' ? 'act-nl' : ''}`} onClick={() => setEnt('nl')}>
+              <img src="/logo-nederland.jpg" alt="NL" style={{ height: 32, objectFit: 'contain' }} />GTO Nederland
+            </button>
+            <button className={`ent-btn ${ent === 'west' ? 'act-west' : ''}`} onClick={() => setEnt('west')}>
+              <img src="/logo-west.jpg" alt="West" style={{ height: 32, objectFit: 'contain' }} />GTO West
+            </button>
+          </div>
+          <NavRow next={2} />
+        </div>
+      )}
+
+      {/* STAP 2 — Klant & project */}
+      {step === 2 && (
+        <div className="card">
+          <div className="card-hdr">Klant & project</div>
+          <NavRow back={1} next={3} nextDisabled={!selKlant || !selProj} />
+          <div className="form-grid-2" style={{ marginTop: 12 }}>
+            <div>
+              <div className="flbl" style={{ marginBottom: 6 }}>Klant</div>
+              <input className="finput" placeholder="🔍 Zoek klant..." value={zoekKlant}
+                onChange={ev => setZoekKlant(ev.target.value)} style={{ marginBottom: 8 }} />
+              <div style={{ maxHeight: 320, overflowY: 'auto' }}>
+                {filteredKlanten.map(k => (
+                  <div key={k.id} className={`list-item clickable ${selKlant?.id === k.id ? 'selected' : ''}`} onClick={() => pickKlant(k)}>
+                    <div className="av av-coral">{av(k.naam)}</div>
+                    <div className="pinfo"><div className="pname">{k.naam}</div><div className="psub">{k.contact}</div></div>
+                    {k.afw && k.afw.length > 0 && <span className="badge badge-afw">Afw.</span>}
+                  </div>
+                ))}
+              </div>
+            </div>
+            <div>
+              <div className="flbl" style={{ marginBottom: 6, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span>Project {!selKlant && <span style={{ color: '#bbb', fontWeight: 400 }}>(selecteer eerst klant)</span>}</span>
+                {selKlant && <button className="btn btn-sm" style={{ fontSize: 11 }} onClick={openNieuwProj}>+ Nieuw project</button>}
+              </div>
+              <div style={{ opacity: selKlant ? 1 : 0.4, pointerEvents: selKlant ? 'auto' : 'none', maxHeight: 320, overflowY: 'auto' }}>
+                {selKlant?.projecten.map(p => (
+                  <div key={p.id} className={`list-item clickable ${selProj?.id === p.id ? 'selected' : ''}`} onClick={() => pickProj(p)}>
+                    <div className="proj-icon">📁</div>
+                    <div className="pinfo"><div className="pname">{p.naam}</div><div className="psub">Nr: {p.nr} · {p.werkadres}</div></div>
+                  </div>
+                ))}
+                {selKlant && !selKlant.projecten.length && <div className="empty">Geen projecten</div>}
+              </div>
+            </div>
+          </div>
+          {selKlant?.afw && selKlant.afw.length > 0 && (
+            <div className="afw-box" style={{ marginTop: 10 }}>
+              <div className="afw-title">⚠ Klantspecifieke afwijkingen actief</div>
+              {selKlant.afw.map((a, i) => <div key={i} className="afw-item">{a}</div>)}
+            </div>
+          )}
+          <NavRow back={1} next={3} nextDisabled={!selKlant || !selProj} />
+        </div>
+      )}
+
+      {/* STAP 3 — Monteurs */}
+      {step === 3 && (
+        <div className="card">
+          <div className="card-hdr">Selecteer monteurs <span style={{ fontSize: 11, fontWeight: 400, color: '#999' }}>— meerdere mogelijk</span></div>
+          <NavRow back={2} next={4} nextDisabled={!selMons.length} />
+          <div className="tag-list" style={{ margin: '8px 0' }}>
+            {selMons.map(m => <span key={m.id} className="tag">{m.naam} <span className="tag-x" onClick={() => toggleMon(m)}>×</span></span>)}
+          </div>
+          <input className="finput" placeholder="🔍 Zoek monteur of bedrijf..." value={zoekMon}
+            onChange={ev => setZoekMon(ev.target.value)} style={{ marginBottom: 8 }} />
+          <div style={{ maxHeight: 380, overflowY: 'auto' }}>
+            {filteredMons.map(m => {
+              const isSel = selMons.find(x => x.id === m.id)
+              const persnr = getPersnr(m, ent)
+              return (
+                <div key={m.id} className={`list-item clickable ${isSel ? 'selected' : ''}`} onClick={() => toggleMon(m)}>
+                  <div className={`chk ${isSel ? 'on' : ''}`} />
+                  <div className="av av-blue">{av(m.naam)}</div>
+                  <div className="pinfo">
+                    <div className="pname">{m.naam}</div>
+                    <div className="psub">{m.handelsnaam} · {persnr ? `#${persnr}` : <span style={{ color: '#e8651a' }}>nr ontbreekt voor {e.naam}</span>}</div>
+                  </div>
+                  {persnr ? <span className={`badge ${isWestPersnr(persnr) ? 'badge-west' : 'badge-nl'}`}>#{persnr}</span> : <span className="badge badge-afw">Nr ontbreekt</span>}
+                </div>
+              )
+            })}
+          </div>
+          <NavRow back={2} next={4} nextDisabled={!selMons.length} />
+        </div>
+      )}
+
+      {/* STAP 4 — Tarieven & datum */}
+      {step === 4 && (
+        <div className="card">
+          <div className="card-hdr">Tarieven & datum</div>
+          <NavRow back={3} />
+          <div className="summ" style={{ margin: '10px 0' }}>
+            <strong>{e.naam}</strong> · {selKlant?.naam} · {selProj?.naam} ({selProj?.nr})
+          </div>
+          {selMons.map(m => {
+            const persnr = getPersnr(m, ent)
+            return (
+              <div key={m.id} style={{ background: '#f8f8f8', borderRadius: 6, padding: '10px 12px', marginBottom: 8 }}>
+                <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
+                  {m.naam} {persnr ? <span className={`badge ${isWestPersnr(persnr) ? 'badge-west' : 'badge-nl'}`}>#{persnr}</span> : <span className="badge badge-afw">Nr ontbreekt</span>}
+                </div>
+                {/* Persoonsnummer inline invoeren als het ontbreekt */}
+                {!persnr && (
+                  <div className="fg" style={{ marginBottom: 8 }}>
+                    <label className="flbl" style={{ color: '#e8651a' }}>Persoonsnummer voor {e.naam} — wordt opgeslagen in profiel</label>
+                    <input className="finput" placeholder={ent === 'west' ? 'bijv. W134' : 'bijv. 284'}
+                      onBlur={ev => { if (ev.target.value.trim()) savePersnrInOverzicht(m.id, ev.target.value.trim()) }}
+                      onKeyDown={ev => { if (ev.key === 'Enter' && ev.target.value.trim()) savePersnrInOverzicht(m.id, ev.target.value.trim()) }} />
+                  </div>
+                )}
+                <div className="form-grid-3">
+                  <div className="fg">
+                    <label className="flbl">Uurtarief monteur (€)</label>
+                    <input className="finput" type="number" step="0.01" placeholder="45.00" value={tarieven[`${m.id}_zzp`] || ''}
+                      onChange={ev => setTarief(m.id, 'zzp', ev.target.value)} />
+                  </div>
+                  <div className="fg">
+                    <label className="flbl">Uurtarief klant (€)</label>
+                    <input className="finput" type="number" step="0.01" placeholder="54.00" value={tarieven[`${m.id}_kl`] || ''}
+                      onChange={ev => setTarief(m.id, 'kl', ev.target.value)} />
+                  </div>
+                  <div className="fg">
+                    <label className="flbl">Reisuur (vrij tekst, bijv. "1 reisuur 1:1")</label>
+                    <input className="finput" type="text" placeholder="1 reisuur 1:1" value={tarieven[`${m.id}_reis`] || ''}
+                      onChange={ev => setTarief(m.id, 'reis', ev.target.value)} />
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+          <div className="form-grid-2" style={{ marginTop: 10 }}>
+            <div className="fg"><label className="flbl">Startdatum</label><input className="finput" type="date" value={form.start} onChange={ev => setForm(f => ({ ...f, start: ev.target.value }))} /></div>
+            <div className="fg"><label className="flbl">Datum handtekening</label><input className="finput" type="date" value={form.signdate} onChange={ev => setForm(f => ({ ...f, signdate: ev.target.value }))} /></div>
+          </div>
+          <div className="fg" style={{ marginTop: 8 }}>
+            <label className="flbl">Opdrachtomschrijving</label>
+            <textarea className="finput" rows={3} style={{ resize: 'vertical' }} value={form.omschr} onChange={ev => setForm(f => ({ ...f, omschr: ev.target.value }))} />
+          </div>
+          <div className="nav-row" style={{ marginTop: 12 }}>
+            <button className="btn btn-sm" onClick={() => goStep(3)}>← Terug</button>
+            <button className="btn btn-primary btn-sm" onClick={buildOverzicht}>Naar overzicht →</button>
+          </div>
+        </div>
+      )}
+
+      {/* STAP 5 — Bewerkbaar overzicht */}
+      {step === 5 && overzicht && (
+        <div>
+          <div className="card">
+            <div className="card-hdr">Controleer & bewerk — alles wordt automatisch opgeslagen</div>
+            <p style={{ fontSize: 12, color: '#888', marginBottom: 14 }}>
+              Pas hier gegevens aan vóór het genereren. Wijzigingen worden direct opgeslagen in het profiel van de betreffende monteur, klant of project — de volgende keer staan ze er al goed in.
+            </p>
+
+            {/* Entiteit & data */}
+            <div className="ov-sectie">📋 Overeenkomst</div>
+            <div className="form-grid-2">
+              <div className="ov-field"><div className="ov-label">Entiteit</div><div className="ov-static">{e.naam}</div></div>
+              <div className="ov-field"><div className="ov-label">Startdatum</div>
+                <input className="finput ov-input" type="date" value={overzicht.startdatum || ''} onChange={ev => updateOv('startdatum', ev.target.value)} />
+              </div>
+              <div className="ov-field"><div className="ov-label">Datum handtekening</div>
+                <input className="finput ov-input" type="date" value={overzicht.signdate || ''} onChange={ev => updateOv('signdate', ev.target.value)} />
+              </div>
+              <div className="ov-field full-width">
+                <EditField label="Opdrachtomschrijving" value={overzicht.omschr} onChange={v => updateOv('omschr', v)} multiline />
+              </div>
+            </div>
+
+            {/* Klant */}
+            <div className="ov-sectie">🏢 Klant</div>
+            <div className="form-grid-2">
+              <EditField label="Bedrijfsnaam" value={overzicht.klant.naam} onChange={v => updateOv('klant.naam', v)} />
+              <EditField label="Adres" value={overzicht.klant.adres} onChange={v => updateOv('klant.adres', v)} />
+              <EditField label="KvK-nummer" value={overzicht.klant.kvk} onChange={v => updateOv('klant.kvk', v)} />
+              <EditField label="BTW-nummer" value={overzicht.klant.btw} onChange={v => updateOv('klant.btw', v)} />
+              <EditField label="Contactpersoon" value={overzicht.klant.contact} onChange={v => updateOv('klant.contact', v)} />
+              <EditField label="Factuur e-mail" value={overzicht.klant.fmail} onChange={v => updateOv('klant.fmail', v)} />
+            </div>
+
+            {/* Tekenbevoegde */}
+            <div className="ov-sectie">✍ Tekenbevoegde</div>
+            <div style={{ position: 'relative' }}>
+              <div className="ov-field">
+                <div className="ov-label">Tekenbevoegde voor dit project</div>
+                <div className="tb-selector" onClick={() => { setTbDropdownOpen(o => !o); setNieuwTbMode(false) }}>
+                  <span>{overzicht.tekenbevoegde ? overzicht.tekenbevoegde.naam : <span style={{ color: '#bbb' }}>— Selecteer tekenbevoegde —</span>}</span>
+                  <span style={{ color: '#bbb' }}>▼</span>
+                </div>
+              </div>
+              {tbDropdownOpen && (
+                <div className="tb-dropdown">
+                  {selKlant.tekenbevoegden.map(tb => (
+                    <div key={tb.id} className="tb-option" onClick={() => kiesTekenbevoegde(tb)}>
+                      {tb.naam} <span style={{ fontSize: 10, color: '#bbb' }}>{tb.functie}</span>
+                    </div>
+                  ))}
+                  <div className="tb-option" style={{ color: '#e8651a', borderTop: '1px solid #eee' }} onClick={() => setNieuwTbMode(true)}>
+                    + Nieuwe tekenbevoegde toevoegen
+                  </div>
+                  {nieuwTbMode && (
+                    <div style={{ padding: '8px 10px', borderTop: '1px solid #eee' }}>
+                      <input className="finput" autoFocus placeholder="Naam tekenbevoegde" value={nieuwTbInput}
+                        onChange={ev => setNieuwTbInput(ev.target.value)}
+                        onKeyDown={ev => ev.key === 'Enter' && voegNieuweTbToe()} style={{ marginBottom: 6 }} />
+                      <button className="btn btn-primary btn-sm" onClick={voegNieuweTbToe} disabled={!nieuwTbInput.trim()}>Toevoegen & koppelen</button>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            {/* Project */}
+            <div className="ov-sectie">📁 Project</div>
+            <div className="form-grid-2">
+              <EditField label="Projectnummer" value={overzicht.project.nr} onChange={v => updateOv('project.nr', v)} />
+              <EditField label="Projectnaam" value={overzicht.project.naam} onChange={v => updateOv('project.naam', v)} />
+              <EditField label="Werkadres" value={overzicht.project.werkadres} onChange={v => updateOv('project.werkadres', v)} />
+            </div>
+
+            {/* Monteurs */}
+            {overzicht.monteurs.map((m, mi) => (
+              <div key={m.id}>
+                <div className="ov-sectie">👷 Monteur {overzicht.monteurs.length > 1 ? mi + 1 : ''}: {m.naam}</div>
+                <div className="form-grid-2">
+                  <EditField label="Naam" value={m.naam} onChange={v => updateOv(`monteur.${m.id}.naam`, v)} />
+                  <EditField label="Handelsnaam" value={m.handelsnaam} onChange={v => updateOv(`monteur.${m.id}.handelsnaam`, v)} />
+                  <EditField label="KvK-nummer" value={m.kvk} onChange={v => updateOv(`monteur.${m.id}.kvk`, v)} />
+                  <EditField label="Adres" value={m.adres} onChange={v => updateOv(`monteur.${m.id}.adres`, v)} />
+                  <div className="ov-field">
+                    <div className="ov-label">Persoonsnummer ({e.naam})</div>
+                    <input className="finput ov-input" value={getPersnr(m, ent) || ''}
+                      onChange={ev => {
+                        updateOv(`monteur.${m.id}.persnr`, ev.target.value)
+                        savePersnrInOverzicht(m.id, ev.target.value)
+                      }}
+                      placeholder={ent === 'west' ? 'bijv. W134' : 'bijv. 284'} />
+                  </div>
+                  <div className="ov-field">
+                    <div className="ov-label">Uurtarief monteur (€)</div>
+                    <input className="finput ov-input" type="number" step="0.01" value={overzicht.tarieven[`${m.id}_zzp`] || ''}
+                      onChange={ev => setOverzicht(ov => ({ ...ov, tarieven: { ...ov.tarieven, [`${m.id}_zzp`]: ev.target.value } }))} />
+                  </div>
+                  <div className="ov-field">
+                    <div className="ov-label">Uurtarief klant (€)</div>
+                    <input className="finput ov-input" type="number" step="0.01" value={overzicht.tarieven[`${m.id}_kl`] || ''}
+                      onChange={ev => setOverzicht(ov => ({ ...ov, tarieven: { ...ov.tarieven, [`${m.id}_kl`]: ev.target.value } }))} />
+                  </div>
+                  <div className="ov-field">
+                    <div className="ov-label">Reisuur (bijv. "1 reisuur 1:1")</div>
+                    <input className="finput ov-input" type="text" placeholder="1 reisuur 1:1" value={overzicht.tarieven[`${m.id}_reis`] || ''}
+                      onChange={ev => setOverzicht(ov => ({ ...ov, tarieven: { ...ov.tarieven, [`${m.id}_reis`]: ev.target.value } }))} />
+                  </div>
+                </div>
+              </div>
+            ))}
+
+            <div className="nav-row" style={{ marginTop: 16 }}>
+              <button className="btn btn-sm" onClick={() => goStep(4)}>← Terug</button>
+              <button className="btn btn-primary btn-sm" disabled={downloading} onClick={handleDownload}>
+                {downloading ? '⏳ Bezig met genereren...' : '⬇ Alles klopt — download overeenkomsten (ZIP)'}
+              </button>
+            </div>
+          </div>
+
+          {/* Ontbrekend modal */}
+          {ontbrekendModal && (
+            <div className="modal-bg">
+              <div className="modal">
+                <div className="modal-title">⚠ Nog niet alle gegevens ingevuld</div>
+                <p style={{ fontSize: 13, color: '#555', marginBottom: 14 }}>Vul de ontbrekende gegevens in — worden direct opgeslagen.</p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 360, overflowY: 'auto' }}>
+                  {ontbrekendModal.map((item, i) => {
+                    const key = item.veld + '_' + (item.monteur_id || '')
+                    return (
+                      <div key={i} className="fg">
+                        <label className="flbl">{item.label} {item.context && <span style={{ fontWeight: 400, color: '#999' }}>— {item.context}</span>}</label>
+                        <input className="finput" value={ontbrekendInputs[key] || ''} onChange={ev => setOntbrekendInputs(p => ({ ...p, [key]: ev.target.value }))} autoFocus={i === 0} />
+                      </div>
+                    )
+                  })}
+                </div>
+                <div className="modal-footer">
+                  <button className="btn btn-sm" onClick={() => setOntbrekendModal(null)}>Annuleren</button>
+                  <button className="btn btn-primary btn-sm" onClick={saveOntbrekendAanvullingen}>Opslaan & downloaden</button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Modals */}
+      {nieuwProjModal && selKlant && (
+        <div className="modal-bg" onClick={ev => ev.target.className === 'modal-bg' && setNieuwProjModal(false)}>
+          <div className="modal">
+            <div className="modal-title">Nieuw project toevoegen aan {selKlant.naam}</div>
+            <div className="form-grid-2">
+              <div className="fg"><label className="flbl">Projectnummer (van klant)</label><input className="finput" value={nieuwProjForm.nr} onChange={ev => setNieuwProjForm(p => ({ ...p, nr: ev.target.value }))} autoFocus /></div>
+              <div className="fg"><label className="flbl">Projectnaam</label><input className="finput" value={nieuwProjForm.naam} onChange={ev => setNieuwProjForm(p => ({ ...p, naam: ev.target.value }))} /></div>
+              <div className="fg full"><label className="flbl">Werkadres</label><input className="finput" value={nieuwProjForm.werkadres} onChange={ev => setNieuwProjForm(p => ({ ...p, werkadres: ev.target.value }))} /></div>
+              <div className="fg full"><label className="flbl">Opdrachtomschrijving</label><textarea className="finput" rows={2} value={nieuwProjForm.omschr} onChange={ev => setNieuwProjForm(p => ({ ...p, omschr: ev.target.value }))} /></div>
+              {selKlant.tekenbevoegden.length > 0 && (
+                <div className="fg full">
+                  <label className="flbl">Tekenbevoegde</label>
+                  <select className="finput" value={nieuwProjForm.tb_id} onChange={ev => setNieuwProjForm(p => ({ ...p, tb_id: ev.target.value }))}>
+                    <option value="">— Selecteer —</option>
+                    {selKlant.tekenbevoegden.map(t => <option key={t.id} value={t.id}>{t.naam}</option>)}
+                  </select>
+                </div>
+              )}
+            </div>
+            <div className="modal-footer">
+              <button className="btn btn-sm" onClick={() => setNieuwProjModal(false)}>Annuleren</button>
+              <button className="btn btn-primary btn-sm" onClick={saveNieuwProj} disabled={!nieuwProjForm.nr || !nieuwProjForm.naam}>Aanmaken & selecteren</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
 
   async function handleDownload() {
     setDownloading(true)
@@ -327,310 +921,7 @@ function NieuweOvereenkomst({ db, save, toast }) {
   function pickKlant(k) { setSelKlant(k); setSelProj(null) }
   function pickProj(p) { setSelProj(p); setForm(f => ({ ...f, omschr: p.omschr })) }
 
-  function toggleMon(m) {
-    setSelMons(prev => prev.find(x => x.id === m.id) ? prev.filter(x => x.id !== m.id) : [...prev, m])
-  }
 
-  function setTarief(monId, field, val) { setTarieven(t => ({ ...t, [`${monId}_${field}`]: val })) }
-
-  // Controleer persoonsnummers voor de gekozen entiteit
-  function checkPersnrs() {
-    const missing = selMons.find(m => !getPersnr(m, ent))
-    if (missing) {
-      setPersnrModal(missing)
-      setPersnrInput('')
-      return false
-    }
-    return true
-  }
-
-  function savePersnr() {
-    if (!persnrInput.trim()) return
-    const nr = persnrInput.trim()
-    const updated = db.monteurs.map(m => {
-      if (m.id !== persnrModal.id) return m
-      if (ent === 'west') return { ...m, persnr_west: nr }
-      return { ...m, persnr_nl: nr }
-    })
-    save({ ...db, monteurs: updated })
-    // Update ook in selMons
-    setSelMons(prev => prev.map(m => m.id !== persnrModal.id ? m : ent === 'west' ? { ...m, persnr_west: nr } : { ...m, persnr_nl: nr }))
-    toast('Persoonsnummer opgeslagen')
-    setPersnrModal(null)
-    // Ga door naar genereren als alles ok is
-    setTimeout(() => {
-      const stillMissing = selMons.find(m => m.id !== persnrModal.id && !getPersnr(m, ent))
-      if (!stillMissing) generate(true)
-    }, 100)
-  }
-
-  function generate(skipCheck = false) {
-    if (!selKlant || !selProj || !selMons.length) return
-    if (!skipCheck && !checkPersnrs()) return
-    const rec = {
-      id: uid(),
-      monteur: selMons.map(m => m.naam).join(', '),
-      klant: selKlant.naam,
-      projnr: `${selProj.nr} + ${selMons.map(m => getPersnr(m, ent)).join(', ')}`,
-      entiteit: ENTS[ent].naam,
-      datum: new Date().toLocaleDateString('nl-NL')
-    }
-    save({ ...db, recent: [...db.recent, rec] })
-    setPrevMon(selMons[0])
-    goStep(5)
-    toast('Overeenkomst gegenereerd')
-  }
-
-  const e = ENTS[ent]
-  const filteredKlanten = db.klanten.filter(k => k.naam.toLowerCase().includes(zoekKlant.toLowerCase()))
-  const filteredMons = db.monteurs.filter(m =>
-    m.naam.toLowerCase().includes(zoekMon.toLowerCase()) ||
-    (m.handelsnaam || '').toLowerCase().includes(zoekMon.toLowerCase())
-  )
-
-  // Nav knoppen — altijd zichtbaar bovenaan en onderaan
-  function NavRow({ back, backLabel, next, nextLabel, nextDisabled }) {
-    return (
-      <div className="nav-row">
-        {back ? <button className="btn btn-sm" onClick={() => goStep(back)}>← {backLabel || 'Terug'}</button> : <span />}
-        {next && <button className="btn btn-primary btn-sm" onClick={() => goStep(next)} disabled={nextDisabled}>{nextLabel || 'Volgende'} →</button>}
-        {next === 'gen' && <button className="btn btn-primary btn-sm" onClick={() => generate()}>Genereer overeenkomst →</button>}
-      </div>
-    )
-  }
-
-  return (
-    <div>
-      <div ref={topRef} />
-
-      {/* STEP BAR — klikbaar */}
-      <div className="step-bar">
-        {['Entiteit','Klant & project','Monteurs','Tarieven & datum','Overeenkomst'].map((lbl, i) => (
-          <div key={i} className={`step ${step > i+1 ? 'done clickable' : step === i+1 ? 'active' : ''}`}
-               onClick={() => { if (step > i+1) goStep(i+1) }}>
-            <div className="step-num">{step > i+1 ? '✓' : i+1}</div>
-            <div className="step-lbl">{lbl}</div>
-            {i < 4 && <div className="step-line" />}
-          </div>
-        ))}
-      </div>
-
-      {/* STAP 1 — Entiteit */}
-      {step === 1 && (
-        <div className="card">
-          <div className="card-hdr">Kies entiteit</div>
-          <NavRow next={2} />
-          <div className="ent-toggle" style={{ margin: '12px 0' }}>
-            <button className={`ent-btn ${ent === 'nl' ? 'act-nl' : ''}`} onClick={() => setEnt('nl')}>
-              <img src="/logo-nederland.jpg" alt="NL" style={{ height: 32, objectFit: 'contain' }} />GTO Nederland
-            </button>
-            <button className={`ent-btn ${ent === 'west' ? 'act-west' : ''}`} onClick={() => setEnt('west')}>
-              <img src="/logo-west.jpg" alt="West" style={{ height: 32, objectFit: 'contain' }} />GTO West
-            </button>
-          </div>
-          <NavRow next={2} />
-        </div>
-      )}
-
-      {/* STAP 2 — Klant & project */}
-      {step === 2 && (
-        <div className="card">
-          <div className="card-hdr">Klant & project</div>
-          <NavRow back={1} next={3} nextDisabled={!selKlant || !selProj} />
-          <div className="form-grid-2" style={{ marginTop: 12 }}>
-            <div>
-              <div className="flbl" style={{ marginBottom: 6 }}>Klant</div>
-              <input className="finput" placeholder="🔍 Zoek klant..." value={zoekKlant}
-                onChange={e => setZoekKlant(e.target.value)} style={{ marginBottom: 8 }} />
-              <div style={{ maxHeight: 320, overflowY: 'auto' }}>
-                {filteredKlanten.map(k => (
-                  <div key={k.id} className={`list-item clickable ${selKlant?.id === k.id ? 'selected' : ''}`} onClick={() => pickKlant(k)}>
-                    <div className="av av-coral">{av(k.naam)}</div>
-                    <div className="pinfo"><div className="pname">{k.naam}</div><div className="psub">{k.contact}</div></div>
-                    {k.afw.length > 0 && <span className="badge badge-afw">Afw.</span>}
-                  </div>
-                ))}
-              </div>
-            </div>
-            <div>
-              <div className="flbl" style={{ marginBottom: 6 }}>Project {!selKlant && <span style={{ color: '#bbb', fontWeight: 400 }}>(selecteer eerst klant)</span>}</div>
-              <div style={{ opacity: selKlant ? 1 : 0.4, pointerEvents: selKlant ? 'auto' : 'none', maxHeight: 360, overflowY: 'auto' }}>
-                {selKlant?.projecten.map(p => (
-                  <div key={p.id} className={`list-item clickable ${selProj?.id === p.id ? 'selected' : ''}`} onClick={() => pickProj(p)}>
-                    <div className="proj-icon">📁</div>
-                    <div className="pinfo"><div className="pname">{p.naam}</div><div className="psub">Nr: {p.nr} · {p.werkadres}</div></div>
-                  </div>
-                ))}
-                {selKlant && !selKlant.projecten.length && <div className="empty">Geen projecten</div>}
-              </div>
-            </div>
-          </div>
-          {selKlant?.afw.length > 0 && (
-            <div className="afw-box" style={{ marginTop: 10 }}>
-              <div className="afw-title">⚠ Klantspecifieke afwijkingen actief</div>
-              {selKlant.afw.map((a, i) => <div key={i} className="afw-item">{a}</div>)}
-            </div>
-          )}
-          <NavRow back={1} next={3} nextDisabled={!selKlant || !selProj} />
-        </div>
-      )}
-
-      {/* STAP 3 — Monteurs */}
-      {step === 3 && (
-        <div className="card">
-          <div className="card-hdr">Selecteer monteurs <span style={{ fontSize: 11, fontWeight: 400, color: '#999' }}>— meerdere mogelijk</span></div>
-          <NavRow back={2} next={4} nextDisabled={!selMons.length} />
-          <div className="tag-list" style={{ margin: '8px 0' }}>
-            {selMons.map(m => <span key={m.id} className="tag">{m.naam} <span className="tag-x" onClick={() => toggleMon(m)}>×</span></span>)}
-          </div>
-          <input className="finput" placeholder="🔍 Zoek monteur of bedrijf..." value={zoekMon}
-            onChange={e => setZoekMon(e.target.value)} style={{ marginBottom: 8 }} />
-          <div style={{ maxHeight: 380, overflowY: 'auto' }}>
-            {filteredMons.map(m => {
-              const isSel = selMons.find(x => x.id === m.id)
-              const persnr = getPersnr(m, ent)
-              const heeftPersnr = !!persnr
-              return (
-                <div key={m.id} className={`list-item clickable ${isSel ? 'selected' : ''}`} onClick={() => toggleMon(m)}>
-                  <div className={`chk ${isSel ? 'on' : ''}`} />
-                  <div className="av av-blue">{av(m.naam)}</div>
-                  <div className="pinfo">
-                    <div className="pname">{m.naam}</div>
-                    <div className="psub">{m.handelsnaam} · #{persnr || <span style={{ color: '#e8651a' }}>ontbreekt voor {e.naam}</span>}</div>
-                  </div>
-                  {heeftPersnr
-                    ? <span className={`badge ${isWestPersnr(persnr) ? 'badge-west' : 'badge-nl'}`}>#{persnr}</span>
-                    : <span className="badge badge-afw">Nr ontbreekt</span>
-                  }
-                </div>
-              )
-            })}
-          </div>
-          <NavRow back={2} next={4} nextDisabled={!selMons.length} />
-        </div>
-      )}
-
-      {/* STAP 4 — Tarieven & datum */}
-      {step === 4 && (
-        <div className="card">
-          <div className="card-hdr">Tarieven & datum</div>
-          <NavRow back={3} next="gen" />
-          <div className="summ" style={{ margin: '10px 0' }}>
-            <strong>{e.naam}</strong> · Klant: <strong>{selKlant?.naam}</strong> · Project: <strong>{selProj?.naam}</strong> ({selProj?.nr})<br />
-            Monteurs: <strong>{selMons.map(m => m.naam).join(', ')}</strong>
-          </div>
-          {selMons.map(m => {
-            const persnr = getPersnr(m, ent)
-            return (
-              <div key={m.id} style={{ background: '#f8f8f8', borderRadius: 6, padding: '10px 12px', marginBottom: 8 }}>
-                <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
-                  {m.naam}
-                  <span className={`badge ${isWestPersnr(persnr) ? 'badge-west' : 'badge-nl'}`}>#{persnr || '?'}</span>
-                  {!persnr && <span style={{ fontSize: 11, color: '#e8651a' }}>⚠ Persoonsnummer ontbreekt — wordt gevraagd bij genereren</span>}
-                </div>
-                <div className="form-grid-3">
-                  <div className="fg"><label className="flbl">Uurtarief monteur (€)</label><input className="finput" type="number" step="0.01" placeholder="45.00" value={tarieven[`${m.id}_zzp`] || ''} onChange={ev => setTarief(m.id, 'zzp', ev.target.value)} /></div>
-                  <div className="fg"><label className="flbl">Uurtarief klant (€)</label><input className="finput" type="number" step="0.01" placeholder="54.00" value={tarieven[`${m.id}_kl`] || ''} onChange={ev => setTarief(m.id, 'kl', ev.target.value)} /></div>
-                  <div className="fg"><label className="flbl">Reisuur (€, optioneel)</label><input className="finput" type="number" step="0.01" placeholder="22.50" value={tarieven[`${m.id}_reis`] || ''} onChange={ev => setTarief(m.id, 'reis', ev.target.value)} /></div>
-                </div>
-              </div>
-            )
-          })}
-          <div className="form-grid-2" style={{ marginTop: 10 }}>
-            <div className="fg"><label className="flbl">Startdatum</label><input className="finput" type="date" value={form.start} onChange={ev => setForm(f => ({ ...f, start: ev.target.value }))} /></div>
-            <div className="fg"><label className="flbl">Datum handtekening</label><input className="finput" type="date" value={form.signdate} onChange={ev => setForm(f => ({ ...f, signdate: ev.target.value }))} /></div>
-          </div>
-          <div className="fg" style={{ marginTop: 8 }}>
-            <label className="flbl">Opdrachtomschrijving <span style={{ fontWeight: 400, color: '#bbb' }}>(pre-ingevuld, aanpasbaar)</span></label>
-            <textarea className="finput" rows={3} style={{ resize: 'vertical' }} value={form.omschr} onChange={ev => setForm(f => ({ ...f, omschr: ev.target.value }))} />
-          </div>
-          <NavRow back={3} next="gen" />
-        </div>
-      )}
-
-      {/* STAP 5 — Preview */}
-      {step === 5 && prevMon && (
-        <div>
-          <div style={{ display: 'flex', gap: 8, marginBottom: 10, flexWrap: 'wrap' }}>
-            <button className="btn btn-sm" onClick={() => goStep(4)}>← Aanpassen</button>
-            <button className="btn btn-primary btn-sm" disabled={downloading} onClick={handleDownload}>
-              {downloading ? '⏳ Bezig met genereren...' : '⬇ Download overeenkomsten (ZIP)'}
-            </button>
-          </div>
-          {selMons.length > 1 && (
-            <div className="tabs" style={{ marginBottom: 8 }}>
-              {selMons.map(m => <button key={m.id} className={`tab ${prevMon?.id === m.id ? 'active' : ''}`} onClick={() => setPrevMon(m)}>{m.naam.split(' ')[0]}</button>)}
-            </div>
-          )}
-          <div className="tabs">
-            <button className={`tab ${docTab === 'zzp' ? 'active' : ''}`} onClick={() => setDocTab('zzp')}>ZZP overeenkomst</button>
-            <button className={`tab ${docTab === 'klant' ? 'active' : ''}`} onClick={() => setDocTab('klant')}>Klant overeenkomst</button>
-          </div>
-          {docTab === 'zzp' && <POPreview type="zzp" ent={e} mon={prevMon} klant={selKlant} proj={selProj} form={form} tarieven={tarieven} settings={db.template_settings} entKey={ent} />}
-          {docTab === 'klant' && <POPreview type="klant" ent={e} mon={prevMon} klant={selKlant} proj={selProj} form={form} tarieven={tarieven} settings={db.template_settings} entKey={ent} />}
-          <div style={{ display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
-            <button className="btn btn-sm" onClick={() => goStep(4)}>← Aanpassen</button>
-            <button className="btn btn-primary btn-sm" disabled={downloading} onClick={handleDownload}>
-              {downloading ? '⏳ Bezig met genereren...' : '⬇ Download overeenkomsten (ZIP)'}
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* MODAL: persoonsnummer ontbreekt */}
-      {persnrModal && (
-        <div className="modal-bg">
-          <div className="modal">
-            <div className="modal-title">⚠ Persoonsnummer ontbreekt</div>
-            <p style={{ fontSize: 13, color: '#555', marginBottom: 12 }}>
-              <strong>{persnrModal.naam}</strong> heeft nog geen persoonsnummer voor <strong>{e.naam}</strong>.
-              Voer het persoonsnummer in — dit wordt opgeslagen in het profiel van de monteur.
-            </p>
-            <div className="fg">
-              <label className="flbl">Persoonsnummer {ent === 'west' ? '(bijv. W134)' : '(bijv. 284)'}</label>
-              <input className="finput" value={persnrInput} onChange={ev => setPersnrInput(ev.target.value)}
-                placeholder={ent === 'west' ? 'W134' : '284'}
-                onKeyDown={ev => ev.key === 'Enter' && savePersnr()} autoFocus />
-            </div>
-            <div className="modal-footer">
-              <button className="btn btn-sm" onClick={() => setPersnrModal(null)}>Annuleren</button>
-              <button className="btn btn-primary btn-sm" onClick={savePersnr} disabled={!persnrInput.trim()}>Opslaan & doorgaan</button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {ontbrekendModal && (
-        <div className="modal-bg">
-          <div className="modal">
-            <div className="modal-title">⚠ Niet alle gegevens zijn bekend</div>
-            <p style={{ fontSize: 13, color: '#555', marginBottom: 14 }}>
-              Voor een volledig ingevulde overeenkomst ontbreken nog {ontbrekendModal.length === 1 ? 'de volgende gegeven' : 'de volgende gegevens'}.
-              Wat je hier invult wordt automatisch onthouden — de volgende keer hoef je dit niet opnieuw in te vullen.
-            </p>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 360, overflowY: 'auto' }}>
-              {ontbrekendModal.map((item, i) => {
-                const key = item.veld + '_' + (item.monteur_id || '')
-                return (
-                  <div key={i} className="fg">
-                    <label className="flbl">{item.label} {item.context && <span style={{ fontWeight: 400, color: '#999' }}>— {item.context}</span>}</label>
-                    <input className="finput" value={ontbrekendInputs[key] || ''}
-                      onChange={ev => setOntbrekendInputs(p => ({ ...p, [key]: ev.target.value }))}
-                      placeholder={item.label} autoFocus={i === 0} />
-                  </div>
-                )
-              })}
-            </div>
-            <div className="modal-footer">
-              <button className="btn btn-sm" onClick={() => setOntbrekendModal(null)}>Annuleren</button>
-              <button className="btn btn-primary btn-sm" onClick={saveOntbrekendAanvullingen}>Opslaan & doorgaan</button>
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
 
 // ── PO PREVIEW ────────────────────────────────────────────────────────────
 function POPreview({ type, ent, mon, klant, proj, form, tarieven, settings, entKey }) {
