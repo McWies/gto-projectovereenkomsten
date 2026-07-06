@@ -46,6 +46,11 @@ async function validateOvereenkomst({ ent, selKlant, selProj, selMons }) {
 }
 
 async function downloadOvereenkomsten({ ent, selKlant, selProj, selMons, form, tarieven, toast }) {
+  const tb = selKlant.tekenbevoegden.find(t => t.id === selProj.tb_id) || selKlant.tekenbevoegden[0] || { naam: '' }
+  await downloadOvereenkomstenMet({ ent, selKlant, selProj, selMons, form, tarieven, tbNaam: tb.naam, toast })
+}
+
+async function downloadOvereenkomstenMet({ ent, selKlant, selProj, selMons, form, tarieven, tbNaam, toast }) {
   const persoonsnummerVoorMonteur = (m) => getPersnr(m, ent)
 
   const monteursPayload = selMons.map(m => ({
@@ -66,8 +71,6 @@ async function downloadOvereenkomsten({ ent, selKlant, selProj, selMons, form, t
     }
   })
 
-  const tb = selKlant.tekenbevoegden.find(t => t.id === selProj.tb_id) || selKlant.tekenbevoegden[0] || { naam: '' }
-
   const payload = {
     entiteit: ent,
     monteurs: monteursPayload,
@@ -84,7 +87,7 @@ async function downloadOvereenkomsten({ ent, selKlant, selProj, selMons, form, t
       naam: selProj.naam || '',
       werkadres: selProj.werkadres || '',
     },
-    tekenbevoegde: tb.naam,
+    tekenbevoegde: tbNaam || '',
     startdatum_nl: dateToNl(form.start),
     startdatum_iso: form.start || new Date().toISOString().slice(0, 10),
     handtekendatum_nl: dateToNl(form.signdate),
@@ -116,7 +119,7 @@ async function downloadOvereenkomsten({ ent, selKlant, selProj, selMons, form, t
     a.click()
     document.body.removeChild(a)
     URL.revokeObjectURL(url)
-    toast('Download gestart')
+    toast('Download gestart ✓')
   } catch (e) {
     toast('Kon geen verbinding maken met de generator. Probeer het zo nogmaals (server kan opstarten).')
   }
@@ -389,13 +392,22 @@ function NieuweOvereenkomst({ db, save, toast }) {
 
   // ── Download ──────────────────────────────────────────────────────────────
   async function handleDownload() {
+    if (!overzicht) return
     const { updatedKlant, updatedProj, updatedMons } = syncOverzichtNaarDb()
     setDownloading(true)
+
     const updatedSelKlant = updatedKlant || selKlant
     const updatedSelProj = updatedProj || selProj
     const updatedSelMons = updatedMons || selMons
-    const updatedForm = { ...form, omschr: overzicht?.omschr || form.omschr, start: overzicht?.startdatum || form.start, signdate: overzicht?.signdate || form.signdate }
-    const updatedTarieven = overzicht?.tarieven || tarieven
+    const updatedForm = {
+      start: overzicht.startdatum || form.start,
+      signdate: overzicht.signdate || form.signdate,
+      omschr: overzicht.omschr || form.omschr,
+    }
+    const updatedTarieven = overzicht.tarieven || tarieven
+
+    // Haal de tekenbevoegde uit het overzicht (niet uit selProj.tb_id die mogelijk stale is)
+    const tbNaam = overzicht.tekenbevoegde?.naam || ''
 
     const result = await validateOvereenkomst({ ent, selKlant: updatedSelKlant, selProj: updatedSelProj, selMons: updatedSelMons })
     if (!result.compleet && result.ontbrekend.length > 0) {
@@ -404,9 +416,10 @@ function NieuweOvereenkomst({ db, save, toast }) {
       setOntbrekendInputs({})
       return
     }
-    await downloadOvereenkomsten({ ent, selKlant: updatedSelKlant, selProj: updatedSelProj, selMons: updatedSelMons, form: updatedForm, tarieven: updatedTarieven, toast })
+
+    // Bouw payload direct hier om de stale tb_id lookup te omzeilen
+    await downloadOvereenkomstenMet({ ent, selKlant: updatedSelKlant, selProj: updatedSelProj, selMons: updatedSelMons, form: updatedForm, tarieven: updatedTarieven, tbNaam, toast })
     setDownloading(false)
-    toast('Download gestart')
   }
 
   async function saveOntbrekendAanvullingen() {
