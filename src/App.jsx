@@ -47,10 +47,10 @@ async function validateOvereenkomst({ ent, selKlant, selProj, selMons }) {
 
 async function downloadOvereenkomsten({ ent, selKlant, selProj, selMons, form, tarieven, toast }) {
   const tb = selKlant.tekenbevoegden.find(t => t.id === selProj.tb_id) || selKlant.tekenbevoegden[0] || { naam: '' }
-  await downloadOvereenkomstenMet({ ent, selKlant, selProj, selMons, form, tarieven, tbNaam: tb.naam, toast })
+  await downloadOvereenkomstenMet({ ent, selKlant, selProj, selMons, form, tarieven, tbNaam: tb.naam, toast, db })
 }
 
-async function downloadOvereenkomstenMet({ ent, selKlant, selProj, selMons, form, tarieven, tbNaam, toast }) {
+async function downloadOvereenkomstenMet({ ent, selKlant, selProj, selMons, form, tarieven, tbNaam, toast, db }) {
   const persoonsnummerVoorMonteur = (m) => getPersnr(m, ent)
 
   const monteursPayload = selMons.map(m => ({
@@ -93,6 +93,12 @@ async function downloadOvereenkomstenMet({ ent, selKlant, selProj, selMons, form
     handtekendatum_nl: dateToNl(form.signdate),
     tarieven_per_monteur: tarievenPayload,
     opdrachtomschrijving: form.omschr || selProj.omschr || '',
+    // Stuur de juiste voorwaarden mee (klant-override of standaard)
+    artikelen: {
+      [`${ent}_zzp`]:   (db?.standaard_voorwaarden || {})[`${ent}_zzp`] || [],
+      [`${ent}_klant`]: (selKlant.voorwaarden_override?.[`${ent}_klant`]) ||
+                        (db?.standaard_voorwaarden || {})[`${ent}_klant`] || [],
+    },
   }
 
   toast('Overeenkomsten worden gegenereerd...')
@@ -163,7 +169,7 @@ export default function App() {
           </div>
         )}
         <div className="nav-sec">Beheer</div>
-        {[['monteurs','Monteurs'],['klanten','Klanten & projecten'],['instellingen','Instellingen']].map(([id, lbl]) =>
+        {[['monteurs','Monteurs'],['klanten','Klanten & projecten'],['voorwaarden','Voorwaarden'],['instellingen','Instellingen']].map(([id, lbl]) =>
           <div key={id} className={`nav-item ${screen === id ? 'active' : ''}`} onClick={() => setScreen(id)}>
             <span className="nav-dot" />{lbl}
           </div>
@@ -173,7 +179,7 @@ export default function App() {
       <div className="main">
         <div className="topbar">
           <div>
-            <div className="tb-title">{{ dashboard:'Dashboard', nieuw:'Nieuwe overeenkomst', monteurs:'Monteurs', klanten:'Klanten & projecten', instellingen:'Instellingen' }[screen]}</div>
+            <div className="tb-title">{{ dashboard:'Dashboard', nieuw:'Nieuwe overeenkomst', monteurs:'Monteurs', klanten:'Klanten & projecten', voorwaarden:'Voorwaarden beheren', instellingen:'Instellingen' }[screen]}</div>
             <div className="tb-sub">GTO Overeenkomsten Platform</div>
           </div>
           <button className="btn btn-primary btn-sm" onClick={() => setScreen('nieuw')}>+ Nieuwe overeenkomst</button>
@@ -183,6 +189,7 @@ export default function App() {
           {screen === 'nieuw'        && <NieuweOvereenkomst db={db} save={save} toast={toast} />}
           {screen === 'monteurs'     && <MonteursScreen db={db} save={save} toast={toast} />}
           {screen === 'klanten'      && <KlantenScreen db={db} save={save} toast={toast} />}
+          {screen === 'voorwaarden'   && <VoorwaardenScreen db={db} save={save} toast={toast} />}
           {screen === 'instellingen' && <InstellingenScreen db={db} save={save} toast={toast} />}
         </div>
       </div>
@@ -418,7 +425,7 @@ function NieuweOvereenkomst({ db, save, toast }) {
     }
 
     // Bouw payload direct hier om de stale tb_id lookup te omzeilen
-    await downloadOvereenkomstenMet({ ent, selKlant: updatedSelKlant, selProj: updatedSelProj, selMons: updatedSelMons, form: updatedForm, tarieven: updatedTarieven, tbNaam, toast })
+    await downloadOvereenkomstenMet({ ent, selKlant: updatedSelKlant, selProj: updatedSelProj, selMons: updatedSelMons, form: updatedForm, tarieven: updatedTarieven, tbNaam, toast, db })
     setDownloading(false)
   }
 
@@ -1300,6 +1307,292 @@ function KlantenScreen({ db, save, toast }) {
 }
 
 // ── INSTELLINGEN ──────────────────────────────────────────────────────────
+// ── VOORWAARDEN BEHEER ────────────────────────────────────────────────────────
+const TEMPLATE_LABELS = {
+  nl_zzp:     'ZZP overeenkomst — GTO Nederland',
+  west_zzp:   'ZZP overeenkomst — GTO West',
+  nl_klant:   'Klant overeenkomst — GTO Nederland',
+  west_klant: 'Klant overeenkomst — GTO West',
+}
+
+function getVoorwaarden(db, templateKey, klantId = null) {
+  // Klant-override: alleen voor klant-types, en alleen als de klant een eigen versie heeft
+  if (klantId && (templateKey === 'nl_klant' || templateKey === 'west_klant')) {
+    const klant = db.klanten.find(k => k.id === klantId)
+    if (klant?.voorwaarden_override?.[templateKey]) {
+      return klant.voorwaarden_override[templateKey]
+    }
+  }
+  // Standaard voorwaarden
+  return db.standaard_voorwaarden?.[templateKey] || []
+}
+
+function VoorwaardenScreen({ db, save, toast }) {
+  const [selTemplate, setSelTemplate] = useState(null)
+  const [selKlant, setSelKlant] = useState(null) // null = standaard, anders klant-id
+  const [openArtikelen, setOpenArtikelen] = useState({})
+  const [editModal, setEditModal] = useState(null) // {type: 'sub'|'header'|'nieuw', artNr, subNr?, waarde}
+  const [editValue, setEditValue] = useState('')
+
+  const voorwaarden = selTemplate ? getVoorwaarden(db, selTemplate, selKlant) : []
+  const isKlantOverride = selKlant !== null && selTemplate && (selTemplate === 'nl_klant' || selTemplate === 'west_klant')
+  const heeftOverride = isKlantOverride && !!db.klanten.find(k => k.id === selKlant)?.voorwaarden_override?.[selTemplate]
+
+  function toggleArtikel(nr) {
+    setOpenArtikelen(o => ({ ...o, [nr]: !o[nr] }))
+  }
+
+  function saveVoorwaarden(newArtikelen) {
+    let newDb = { ...db }
+    if (selKlant !== null) {
+      // Sla op als klant-override
+      const klanten = db.klanten.map(k => {
+        if (k.id !== selKlant) return k
+        return {
+          ...k,
+          voorwaarden_override: {
+            ...(k.voorwaarden_override || {}),
+            [selTemplate]: newArtikelen
+          }
+        }
+      })
+      newDb = { ...newDb, klanten }
+    } else {
+      // Sla op als standaard
+      newDb = {
+        ...newDb,
+        standaard_voorwaarden: {
+          ...(db.standaard_voorwaarden || {}),
+          [selTemplate]: newArtikelen
+        }
+      }
+    }
+    save(newDb)
+  }
+
+  function maakKlantOverride() {
+    // Kopieer de standaard voorwaarden naar de klant
+    const standaard = db.standaard_voorwaarden?.[selTemplate] || []
+    const kopie = JSON.parse(JSON.stringify(standaard))
+    saveVoorwaarden(kopie)
+    toast('Gepersonaliseerde versie aangemaakt — aanpassingen gelden alleen voor deze klant')
+  }
+
+  function verwijderKlantOverride() {
+    if (!confirm('Weet je zeker dat je de gepersonaliseerde versie wilt verwijderen? De klant krijgt dan weer het standaard document.')) return
+    const klanten = db.klanten.map(k => {
+      if (k.id !== selKlant) return k
+      const override = { ...(k.voorwaarden_override || {}) }
+      delete override[selTemplate]
+      return { ...k, voorwaarden_override: override }
+    })
+    save({ ...db, klanten })
+    toast('Gepersonaliseerde versie verwijderd — klant gebruikt nu het standaard document')
+  }
+
+  function openEdit(artNr, subNr, currentText, type = 'sub') {
+    setEditModal({ type, artNr, subNr })
+    setEditValue(currentText)
+  }
+
+  function saveEdit() {
+    if (!editModal) return
+    const { type, artNr, subNr } = editModal
+    const newArtikelen = JSON.parse(JSON.stringify(voorwaarden))
+
+    if (type === 'header') {
+      const art = newArtikelen.find(a => a.nr === artNr)
+      if (art) art.titel = editValue
+    } else if (type === 'sub') {
+      const art = newArtikelen.find(a => a.nr === artNr)
+      if (art) {
+        const sub = art.subaartikelen.find(s => s.nr === subNr)
+        if (sub) sub.tekst = editValue
+      }
+    } else if (type === 'nieuw-sub') {
+      const art = newArtikelen.find(a => a.nr === artNr)
+      if (art && editValue.trim()) {
+        art.subaartikelen.push({
+          nr: art.subaartikelen.length + 1,
+          tekst: editValue.trim()
+        })
+      }
+    } else if (type === 'nieuw-artikel') {
+      if (editValue.trim()) {
+        const maxNr = Math.max(0, ...newArtikelen.map(a => a.nr))
+        newArtikelen.push({ nr: maxNr + 1, titel: editValue.trim(), subaartikelen: [] })
+      }
+    }
+
+    saveVoorwaarden(newArtikelen)
+    setEditModal(null)
+    toast('Opgeslagen')
+  }
+
+  function deleteSub(artNr, subNr) {
+    if (!confirm('Sub-artikel verwijderen?')) return
+    const newArtikelen = JSON.parse(JSON.stringify(voorwaarden))
+    const art = newArtikelen.find(a => a.nr === artNr)
+    if (art) {
+      art.subaartikelen = art.subaartikelen.filter(s => s.nr !== subNr)
+      // Hernummer
+      art.subaartikelen.forEach((s, i) => { s.nr = i + 1 })
+    }
+    saveVoorwaarden(newArtikelen)
+    toast('Verwijderd')
+  }
+
+  function deleteArtikel(artNr) {
+    if (!confirm('Heel artikel verwijderen?')) return
+    const newArtikelen = voorwaarden.filter(a => a.nr !== artNr)
+    saveVoorwaarden(newArtikelen)
+    toast('Artikel verwijderd')
+  }
+
+  return (
+    <div>
+      {/* Stap 1: kies template */}
+      <div className="card">
+        <div className="card-hdr">Kies overeenkomst</div>
+        <div className="form-grid-2">
+          {Object.entries(TEMPLATE_LABELS).map(([key, label]) => (
+            <div key={key}
+              className={`ent-btn clickable ${selTemplate === key ? (key.startsWith('west') ? 'act-west' : 'act-nl') : ''}`}
+              style={{ cursor: 'pointer', marginBottom: 6 }}
+              onClick={() => { setSelTemplate(key); setSelKlant(null); setOpenArtikelen({}) }}>
+              <img src={key.startsWith('west') ? '/logo-west.jpg' : '/logo-nederland.jpg'} alt=""
+                style={{ height: 24, objectFit: 'contain' }} />
+              {label}
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Stap 2: kies standaard of klant (alleen voor klant-types) */}
+      {selTemplate && (selTemplate === 'nl_klant' || selTemplate === 'west_klant') && (
+        <div className="card">
+          <div className="card-hdr">Wiens voorwaarden bewerken?</div>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button className={`btn btn-sm ${selKlant === null ? 'btn-primary' : ''}`}
+              onClick={() => setSelKlant(null)}>
+              📄 Standaard document
+            </button>
+            {db.klanten.filter(k => k.voorwaarden_override?.[selTemplate]).map(k => (
+              <button key={k.id} className={`btn btn-sm ${selKlant === k.id ? 'btn-primary' : ''}`}
+                onClick={() => setSelKlant(k.id)}>
+                🏢 {k.naam}
+              </button>
+            ))}
+            <select className="finput" style={{ width: 'auto', fontSize: 12 }}
+              onChange={ev => { if (ev.target.value) setSelKlant(parseInt(ev.target.value)) }}
+              value="">
+              <option value="">+ Klant met afwijkende voorwaarden...</option>
+              {db.klanten.filter(k => !k.voorwaarden_override?.[selTemplate]).map(k => (
+                <option key={k.id} value={k.id}>{k.naam}</option>
+              ))}
+            </select>
+          </div>
+          {selKlant !== null && !heeftOverride && (
+            <div className="afw-box" style={{ marginTop: 10 }}>
+              <div className="afw-title">Deze klant gebruikt momenteel het standaard document</div>
+              <button className="btn btn-primary btn-sm" style={{ marginTop: 8 }} onClick={maakKlantOverride}>
+                Maak gepersonaliseerde versie aan voor {db.klanten.find(k => k.id === selKlant)?.naam}
+              </button>
+            </div>
+          )}
+          {selKlant !== null && heeftOverride && (
+            <div style={{ marginTop: 8, padding: '8px 12px', background: '#e8f3ec', borderRadius: 6, fontSize: 12, color: '#2a5a3a', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <span>✅ {db.klanten.find(k => k.id === selKlant)?.naam} heeft een gepersonaliseerde versie</span>
+              <button className="btn btn-sm btn-danger" onClick={verwijderKlantOverride}>Verwijder gepersonaliseerde versie</button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Artikelen editor */}
+      {selTemplate && (voorwaarden.length > 0 || selKlant === null) && (heeftOverride || selKlant === null) && (
+        <div className="card">
+          <div className="card-hdr">
+            <span>
+              {selKlant !== null
+                ? `Voorwaarden voor ${db.klanten.find(k => k.id === selKlant)?.naam}`
+                : `Standaard — ${TEMPLATE_LABELS[selTemplate]}`}
+            </span>
+            {selKlant === null && (
+              <span style={{ fontSize: 11, fontWeight: 400, color: '#e8651a' }}>
+                ⚠ Aanpassingen hier gelden voor ALLE nieuwe overeenkomsten (behalve klanten met een gepersonaliseerde versie)
+              </span>
+            )}
+          </div>
+
+          {voorwaarden.map(art => (
+            <div key={art.nr} style={{ marginBottom: 8, border: '1px solid #eee', borderRadius: 8, overflow: 'hidden' }}>
+              {/* Artikel header */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px', background: '#f8f8f8', cursor: 'pointer' }}
+                onClick={() => toggleArtikel(art.nr)}>
+                <span style={{ fontWeight: 700, fontSize: 13 }}>{art.nr}. {art.titel}</span>
+                <span style={{ color: '#bbb', marginLeft: 'auto' }}>{art.subaartikelen.length} sub-artikelen</span>
+                <button className="btn btn-sm" style={{ fontSize: 10 }}
+                  onClick={ev => { ev.stopPropagation(); openEdit(art.nr, null, art.titel, 'header') }}>✏ Titel</button>
+                <button className="btn btn-sm btn-danger" style={{ fontSize: 10 }}
+                  onClick={ev => { ev.stopPropagation(); deleteArtikel(art.nr) }}>×</button>
+                <span style={{ color: '#bbb' }}>{openArtikelen[art.nr] ? '▲' : '▼'}</span>
+              </div>
+
+              {/* Sub-artikelen */}
+              {openArtikelen[art.nr] && (
+                <div style={{ padding: '8px 12px' }}>
+                  {art.subaartikelen.map(sub => (
+                    <div key={sub.nr} style={{ display: 'flex', gap: 8, alignItems: 'flex-start', padding: '6px 0', borderBottom: '1px solid #f0f0f0' }}>
+                      <span style={{ fontSize: 11, color: '#bbb', minWidth: 24, paddingTop: 2 }}>{sub.nr}.</span>
+                      <div style={{ flex: 1, fontSize: 12, lineHeight: 1.5 }}>{sub.tekst}</div>
+                      <button className="btn btn-sm" style={{ fontSize: 10, flexShrink: 0 }}
+                        onClick={() => openEdit(art.nr, sub.nr, sub.tekst, 'sub')}>✏</button>
+                      <button className="btn btn-sm btn-danger" style={{ fontSize: 10, flexShrink: 0 }}
+                        onClick={() => deleteSub(art.nr, sub.nr)}>×</button>
+                    </div>
+                  ))}
+                  <button className="add-btn" style={{ marginTop: 6 }}
+                    onClick={() => openEdit(art.nr, null, '', 'nieuw-sub')}>
+                    + Sub-artikel toevoegen
+                  </button>
+                </div>
+              )}
+            </div>
+          ))}
+
+          <button className="add-btn" style={{ marginTop: 8 }}
+            onClick={() => openEdit(null, null, '', 'nieuw-artikel')}>
+            + Nieuw artikel toevoegen
+          </button>
+        </div>
+      )}
+
+      {/* Edit modal */}
+      {editModal && (
+        <div className="modal-bg" onClick={ev => ev.target.className === 'modal-bg' && setEditModal(null)}>
+          <div className="modal">
+            <div className="modal-title">
+              {{ sub: 'Sub-artikel bewerken', header: 'Artikel-titel bewerken',
+                 'nieuw-sub': 'Sub-artikel toevoegen', 'nieuw-artikel': 'Nieuw artikel toevoegen' }[editModal.type]}
+            </div>
+            {editModal.type === 'header' || editModal.type === 'nieuw-artikel'
+              ? <input className="finput" value={editValue} onChange={ev => setEditValue(ev.target.value)} autoFocus />
+              : <textarea className="finput" rows={6} style={{ resize: 'vertical' }} value={editValue}
+                  onChange={ev => setEditValue(ev.target.value)} autoFocus />
+            }
+            <div className="modal-footer">
+              <button className="btn btn-sm" onClick={() => setEditModal(null)}>Annuleren</button>
+              <button className="btn btn-primary btn-sm" onClick={saveEdit}>Opslaan</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+
 function InstellingenScreen({ db, save, toast }) {
   const [ts, setTs] = useState({ ...db.template_settings })
   function saveSets() { save({ ...db, template_settings: ts }); toast('Instellingen opgeslagen') }
