@@ -137,8 +137,16 @@ function fmtEuro(v) { if (!v || isNaN(v)) return '[tarief]'; return '€ ' + par
 
 // Haal het juiste persoonsnummer op voor een monteur in een entiteit
 function getPersnr(mon, ent) {
-  if (ent === 'west') return mon.persnr_west || mon.persnr || ''
-  return mon.persnr_nl || mon.persnr || ''
+  if (ent === 'west') {
+    // Gebruik alleen persnr_west, of het generieke persnr als dat een W-nummer is
+    if (mon.persnr_west) return mon.persnr_west
+    if (mon.persnr && String(mon.persnr).startsWith('W')) return mon.persnr
+    return ''
+  }
+  // NL: gebruik persnr_nl, of het generieke persnr als dat GEEN W-nummer is
+  if (mon.persnr_nl) return mon.persnr_nl
+  if (mon.persnr && !String(mon.persnr).startsWith('W')) return mon.persnr
+  return ''
 }
 
 function isWestPersnr(persnr) { return persnr && persnr.toString().startsWith('W') }
@@ -772,7 +780,8 @@ function NieuweOvereenkomst({ db, save, toast }) {
                     <div className="ov-label">Persoonsnummer ({e.naam})</div>
                     <input className="finput ov-input" value={getPersnr(m, ent) || ''}
                       onChange={ev => {
-                        updateOv(`monteur.${m.id}.persnr`, ev.target.value)
+                        const persnrField = ent === 'west' ? 'persnr_west' : 'persnr_nl'
+                        updateOv(`monteur.${m.id}.${persnrField}`, ev.target.value)
                         savePersnrInOverzicht(m.id, ev.target.value)
                       }}
                       placeholder={ent === 'west' ? 'bijv. W134' : 'bijv. 284'} />
