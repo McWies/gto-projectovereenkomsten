@@ -237,6 +237,7 @@ function NieuweOvereenkomst({ db, save, toast }) {
   const [zoekKlant, setZoekKlant] = useState('')
   const [zoekMon, setZoekMon] = useState('')
   const [downloading, setDownloading] = useState(false)
+  const [downloaded, setDownloaded] = useState(false)
   const [ontbrekendModal, setOntbrekendModal] = useState(null)
   const [ontbrekendInputs, setOntbrekendInputs] = useState({})
   const [nieuwProjModal, setNieuwProjModal] = useState(false)
@@ -426,6 +427,18 @@ function NieuweOvereenkomst({ db, save, toast }) {
 
     // Bouw payload direct hier om de stale tb_id lookup te omzeilen
     await downloadOvereenkomstenMet({ ent, selKlant: updatedSelKlant, selProj: updatedSelProj, selMons: updatedSelMons, form: updatedForm, tarieven: updatedTarieven, tbNaam, toast, db })
+
+    // Sla op in recente overeenkomsten en markeer als gedownload
+    const rec = {
+      id: uid(),
+      monteur: updatedSelMons.map(m => m.naam).join(', '),
+      klant: updatedSelKlant.naam,
+      projnr: `${updatedSelProj.nr} + ${updatedSelMons.map(m => getPersnr(m, ent)).join(', ')}`,
+      entiteit: ENTS[ent].naam,
+      datum: new Date().toLocaleDateString('nl-NL'),
+    }
+    save({ ...db, recent: [...(db.recent || []), rec] })
+    setDownloaded(true)
     setDownloading(false)
   }
 
@@ -789,6 +802,28 @@ function NieuweOvereenkomst({ db, save, toast }) {
                 {downloading ? '⏳ Bezig met genereren...' : '⬇ Alles klopt — download overeenkomsten (ZIP)'}
               </button>
             </div>
+
+            {downloaded && (
+              <div style={{ marginTop: 14, padding: '12px 16px', background: '#e8f3ec', borderRadius: 8,
+                            display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                <span style={{ fontSize: 13, color: '#2a5a3a', fontWeight: 600 }}>
+                  ✅ Overeenkomsten succesvol gedownload
+                </span>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button className="btn btn-sm" onClick={handleDownload} disabled={downloading}>
+                    ⬇ Opnieuw downloaden
+                  </button>
+                  <button className="btn btn-primary btn-sm" onClick={() => {
+                    setStep(1); setEnt('nl'); setSelKlant(null); setSelProj(null)
+                    setSelMons([]); setForm({ start: '', signdate: '', omschr: '' })
+                    setTarieven({}); setOverzicht(null); setDownloaded(false)
+                    scrollTop()
+                  }}>
+                    + Nieuwe overeenkomst
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Ontbrekend modal */}
