@@ -51,7 +51,17 @@ async function downloadOvereenkomsten({ ent, selKlant, selProj, selMons, form, t
 }
 
 async function downloadOvereenkomstenMet({ ent, selKlant, selProj, selMons, form, tarieven, tbNaam, toast, db }) {
-  const persoonsnummerVoorMonteur = (m) => getPersnr(m, ent)
+  // Haal het entiteit-specifieke persoonsnummer op — NOOIT het generieke persnr als dat van de andere entiteit is
+  const persoonsnummerVoorMonteur = (m) => {
+    if (ent === 'west') {
+      if (m.persnr_west) return m.persnr_west
+      if (m.persnr && String(m.persnr).startsWith('W')) return m.persnr
+      return ''
+    }
+    if (m.persnr_nl) return m.persnr_nl
+    if (m.persnr && !String(m.persnr).startsWith('W')) return m.persnr
+    return ''
+  }
 
   const monteursPayload = selMons.map(m => ({
     id: m.id,
@@ -372,7 +382,11 @@ function NieuweOvereenkomst({ db, save, toast }) {
       monteurs = monteurs.map(m => {
         if (m.id !== om.id) return m
         const persnrField = ent === 'west' ? 'persnr_west' : 'persnr_nl'
-        return { ...m, naam: om.naam, handelsnaam: om.handelsnaam, kvk: om.kvk, adres: om.adres, [persnrField]: om.persnr || getPersnr(om, ent) }
+        // Gebruik het entiteit-specifieke veld uit het overzicht als dat bestaat,
+        // anders getPersnr op het overzicht-object — NOOIT het generieke om.persnr
+        // want dat kan het verkeerde entiteit-nummer bevatten.
+        const ovPersnr = om[persnrField] || getPersnr(om, ent)
+        return { ...m, naam: om.naam, handelsnaam: om.handelsnaam, kvk: om.kvk, adres: om.adres, [persnrField]: ovPersnr }
       })
     })
 
