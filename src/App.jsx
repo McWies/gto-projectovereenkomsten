@@ -333,8 +333,9 @@ function NieuweOvereenkomst({ db, save, toast }) {
     goStep(5)
   }
 
-  // ── Overzicht: sla gewijzigd veld op én in profiel ────────────────────────
+  // ── Overzicht: sla gewijzigd veld direct op in overzicht én in profiel ──────
   function updateOv(path, value) {
+    // 1. Update het overzicht (lokale UI state)
     setOverzicht(ov => {
       const parts = path.split('.')
       if (parts.length === 1) return { ...ov, [parts[0]]: value }
@@ -345,6 +346,61 @@ function NieuweOvereenkomst({ db, save, toast }) {
       }
       return ov
     })
+
+    // 2. Schrijf direct naar het bijbehorende profiel in de database
+    const parts = path.split('.')
+
+    if (parts[0] === 'klant' && parts[1]) {
+      // Klantgegeven: naam, adres, kvk, btw, contact, fmail, betaling, opzeg
+      const field = parts[1]
+      const klanten = db.klanten.map(k => k.id === selKlant.id ? { ...k, [field]: value } : k)
+      const updatedKlant = klanten.find(k => k.id === selKlant.id)
+      save({ ...db, klanten })
+      setSelKlant(updatedKlant)
+
+    } else if (parts[0] === 'project' && parts[1]) {
+      // Projectgegeven: naam, nr, werkadres
+      const field = parts[1]
+      const klanten = db.klanten.map(k => {
+        if (k.id !== selKlant.id) return k
+        const projecten = k.projecten.map(p => p.id === selProj.id ? { ...p, [field]: value } : p)
+        return { ...k, projecten }
+      })
+      const updatedKlant = klanten.find(k => k.id === selKlant.id)
+      const updatedProj = updatedKlant.projecten.find(p => p.id === selProj.id)
+      save({ ...db, klanten })
+      setSelKlant(updatedKlant)
+      setSelProj(updatedProj)
+
+    } else if (parts[0] === 'omschr') {
+      // Opdrachtomschrijving hoort bij het project
+      const klanten = db.klanten.map(k => {
+        if (k.id !== selKlant.id) return k
+        const projecten = k.projecten.map(p => p.id === selProj.id ? { ...p, omschr: value } : p)
+        return { ...k, projecten }
+      })
+      const updatedKlant = klanten.find(k => k.id === selKlant.id)
+      const updatedProj = updatedKlant.projecten.find(p => p.id === selProj.id)
+      save({ ...db, klanten })
+      setSelKlant(updatedKlant)
+      setSelProj(updatedProj)
+      setForm(f => ({ ...f, omschr: value }))
+
+    } else if (parts[0] === 'monteur' && parts[1] && parts[2]) {
+      // Monteursgegeven: naam, handelsnaam, kvk, adres, persnr_nl, persnr_west
+      const monId = parseInt(parts[1])
+      const field = parts[2]
+      const monteurs = db.monteurs.map(m => m.id === monId ? { ...m, [field]: value } : m)
+      const updatedMon = monteurs.find(m => m.id === monId)
+      save({ ...db, monteurs })
+      setSelMons(prev => prev.map(m => m.id === monId ? updatedMon : m))
+
+    } else if (parts[0] === 'startdatum') {
+      setForm(f => ({ ...f, start: value }))
+
+    } else if (parts[0] === 'signdate') {
+      setForm(f => ({ ...f, signdate: value }))
+    }
   }
 
   function syncOverzichtNaarDb() {
@@ -526,12 +582,28 @@ function NieuweOvereenkomst({ db, save, toast }) {
 
   // ── Bewerkbaar veld component ─────────────────────────────────────────────
   function EditField({ label, value, onChange, multiline, placeholder }) {
+    // Lokale state voor snelle UI-updates terwijl je typt
+    // onBlur slaat op in de database (via updateOv die direct naar db schrijft)
+    const [localVal, setLocalVal] = useState(value || '')
+    // Sync als externe value verandert (bijv. bij reset)
+    useState(() => { setLocalVal(value || '') }, [value])
+
     return (
       <div className="ov-field">
         <div className="ov-label">{label}</div>
         {multiline
-          ? <textarea className="finput ov-input" rows={2} value={value || ''} onChange={ev => onChange(ev.target.value)} placeholder={placeholder || label} />
-          : <input className="finput ov-input" value={value || ''} onChange={ev => onChange(ev.target.value)} placeholder={placeholder || label} />
+          ? <textarea className="finput ov-input" rows={2}
+              value={localVal}
+              placeholder={placeholder || label}
+              onChange={ev => setLocalVal(ev.target.value)}
+              onBlur={ev => { if (ev.target.value !== value) onChange(ev.target.value) }}
+            />
+          : <input className="finput ov-input"
+              value={localVal}
+              placeholder={placeholder || label}
+              onChange={ev => setLocalVal(ev.target.value)}
+              onBlur={ev => { if (ev.target.value !== value) onChange(ev.target.value) }}
+            />
         }
       </div>
     )
@@ -697,7 +769,19 @@ function NieuweOvereenkomst({ db, save, toast }) {
           </div>
           <div className="fg" style={{ marginTop: 8 }}>
             <label className="flbl">Opdrachtomschrijving</label>
-            <textarea className="finput" rows={3} style={{ resize: 'vertical' }} value={form.omschr} onChange={ev => setForm(f => ({ ...f, omschr: ev.target.value }))} />
+            <textarea className="finput" rows={3} style={{ resize: 'vertical' }} value={form.omschr}
+              onChange={ev => setForm(f => ({ ...f, omschr: ev.target.value }))}
+              onBlur={ev => {
+                const waarde = ev.target.value
+                if (waarde !== selProj.omschr) {
+                  const klanten = db.klanten.map(k => {
+                    if (k.id !== selKlant.id) return k
+                    return { ...k, projecten: k.projecten.map(p => p.id === selProj.id ? { ...p, omschr: waarde } : p) }
+                  })
+                  save({ ...db, klanten })
+                  setSelProj({ ...selProj, omschr: waarde })
+                }
+              }} />
           </div>
           <div className="nav-row" style={{ marginTop: 12 }}>
             <button className="btn btn-sm" onClick={() => goStep(3)}>← Terug</button>
