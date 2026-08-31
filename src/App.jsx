@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { getData, saveData, uid } from './data'
 import './App.css'
 
@@ -45,7 +45,7 @@ async function validateOvereenkomst({ ent, selKlant, selProj, selMons }) {
   }
 }
 
-async function downloadOvereenkomsten({ ent, selKlant, selProj, selMons, form, tarieven, toast }) {
+async function downloadOvereenkomsten({ ent, selKlant, selProj, selMons, form, tarieven, toast, db }) {
   const tb = selKlant.tekenbevoegden.find(t => t.id === selProj.tb_id) || selKlant.tekenbevoegden[0] || { naam: '' }
   await downloadOvereenkomstenMet({ ent, selKlant, selProj, selMons, form, tarieven, tbNaam: tb.naam, toast, db })
 }
@@ -163,12 +163,18 @@ function isWestPersnr(persnr) { return persnr && persnr.toString().startsWith('W
 
 export default function App() {
   const [db, setDb] = useState(null)
+  const dbRef = useRef(null)
   const [screen, setScreen] = useState('dashboard')
   const [notify, setNotify] = useState('')
 
-  useEffect(() => { setDb(getData()) }, [])
+  useEffect(() => { const d = getData(); setDb(d); dbRef.current = d }, [])
 
-  function save(newDb) { setDb({ ...newDb }); saveData(newDb) }
+  function save(newDb) {
+    const merged = { ...newDb }
+    setDb(merged)
+    dbRef.current = merged
+    saveData(merged)
+  }
   function toast(msg) { setNotify(msg); setTimeout(() => setNotify(''), 2800) }
 
   if (!db) return <div style={{ padding: 40, fontFamily: 'Arial' }}>Laden...</div>
@@ -308,11 +314,17 @@ function NieuweOvereenkomst({ db, save, toast }) {
     if (!waarde.trim()) return
     const nr = waarde.trim()
     const field = ent === 'west' ? 'persnr_west' : 'persnr_nl'
-    const monteurs = db.monteurs.map(m => m.id === monId ? { ...m, [field]: nr, persnr: nr } : m)
-    save({ ...db, monteurs })
-    setSelMons(prev => prev.map(m => m.id === monId ? { ...m, [field]: nr, persnr: nr } : m))
+    setDb(current => {
+      if (!current) return current
+      const monteurs = current.monteurs.map(m => m.id === monId ? { ...m, [field]: nr } : m)
+      const newDb = { ...current, monteurs }
+      dbRef.current = newDb
+      saveData(newDb)
+      return newDb
+    })
+    setSelMons(prev => prev.map(m => m.id === monId ? { ...m, [field]: nr } : m))
     if (overzicht) {
-      setOverzicht(ov => ({ ...ov, monteurs: ov.monteurs.map(m => m.id === monId ? { ...m, [field]: nr, persnr: nr } : m) }))
+      setOverzicht(ov => ({ ...ov, monteurs: ov.monteurs.map(m => m.id === monId ? { ...m, [field]: nr } : m) }))
     }
   }
 
@@ -334,10 +346,15 @@ function NieuweOvereenkomst({ db, save, toast }) {
   }
 
   // ── Overzicht: sla gewijzigd veld direct op in overzicht én in profiel ──────
+  // Gebruikt setDb met functionele update zodat altijd de MEEST RECENTE staat
+  // wordt gebruikt — dit voorkomt race conditions (stale closures) waarbij
+  // een latere save() een eerdere overschrijft.
   function updateOv(path, value) {
+    const parts = path.split('.')
+
     // 1. Update het overzicht (lokale UI state)
     setOverzicht(ov => {
-      const parts = path.split('.')
+      if (!ov) return ov
       if (parts.length === 1) return { ...ov, [parts[0]]: value }
       if (parts.length === 2) return { ...ov, [parts[0]]: { ...ov[parts[0]], [parts[1]]: value } }
       if (parts[0] === 'monteur') {
@@ -347,57 +364,69 @@ function NieuweOvereenkomst({ db, save, toast }) {
       return ov
     })
 
-    // 2. Schrijf direct naar het bijbehorende profiel in de database
-    const parts = path.split('.')
-
+    // 2. Schrijf direct naar de database via functionele setDb —
+    //    altijd gebaseerd op de actuele current state, nooit op een gesloten waarde.
     if (parts[0] === 'klant' && parts[1]) {
-      // Klantgegeven: naam, adres, kvk, btw, contact, fmail, betaling, opzeg
       const field = parts[1]
-      const klanten = db.klanten.map(k => k.id === selKlant.id ? { ...k, [field]: value } : k)
-      const updatedKlant = klanten.find(k => k.id === selKlant.id)
-      save({ ...db, klanten })
-      setSelKlant(updatedKlant)
+      setDb(current => {
+        if (!current) return current
+        const klanten = current.klanten.map(k => k.id === selKlant.id ? { ...k, [field]: value } : k)
+        const newDb = { ...current, klanten }
+        dbRef.current = newDb
+        saveData(newDb)
+        setSelKlant(klanten.find(k => k.id === selKlant.id))
+        return newDb
+      })
 
     } else if (parts[0] === 'project' && parts[1]) {
-      // Projectgegeven: naam, nr, werkadres
       const field = parts[1]
-      const klanten = db.klanten.map(k => {
-        if (k.id !== selKlant.id) return k
-        const projecten = k.projecten.map(p => p.id === selProj.id ? { ...p, [field]: value } : p)
-        return { ...k, projecten }
+      setDb(current => {
+        if (!current) return current
+        const klanten = current.klanten.map(k => {
+          if (k.id !== selKlant.id) return k
+          return { ...k, projecten: k.projecten.map(p => p.id === selProj.id ? { ...p, [field]: value } : p) }
+        })
+        const newDb = { ...current, klanten }
+        dbRef.current = newDb
+        saveData(newDb)
+        const uk = klanten.find(k => k.id === selKlant.id)
+        setSelKlant(uk)
+        setSelProj(uk.projecten.find(p => p.id === selProj.id))
+        return newDb
       })
-      const updatedKlant = klanten.find(k => k.id === selKlant.id)
-      const updatedProj = updatedKlant.projecten.find(p => p.id === selProj.id)
-      save({ ...db, klanten })
-      setSelKlant(updatedKlant)
-      setSelProj(updatedProj)
 
     } else if (parts[0] === 'omschr') {
-      // Opdrachtomschrijving hoort bij het project
-      const klanten = db.klanten.map(k => {
-        if (k.id !== selKlant.id) return k
-        const projecten = k.projecten.map(p => p.id === selProj.id ? { ...p, omschr: value } : p)
-        return { ...k, projecten }
+      setDb(current => {
+        if (!current) return current
+        const klanten = current.klanten.map(k => {
+          if (k.id !== selKlant.id) return k
+          return { ...k, projecten: k.projecten.map(p => p.id === selProj.id ? { ...p, omschr: value } : p) }
+        })
+        const newDb = { ...current, klanten }
+        dbRef.current = newDb
+        saveData(newDb)
+        const uk = klanten.find(k => k.id === selKlant.id)
+        setSelKlant(uk)
+        setSelProj(uk.projecten.find(p => p.id === selProj.id))
+        setForm(f => ({ ...f, omschr: value }))
+        return newDb
       })
-      const updatedKlant = klanten.find(k => k.id === selKlant.id)
-      const updatedProj = updatedKlant.projecten.find(p => p.id === selProj.id)
-      save({ ...db, klanten })
-      setSelKlant(updatedKlant)
-      setSelProj(updatedProj)
-      setForm(f => ({ ...f, omschr: value }))
 
     } else if (parts[0] === 'monteur' && parts[1] && parts[2]) {
-      // Monteursgegeven: naam, handelsnaam, kvk, adres, persnr_nl, persnr_west
       const monId = parseInt(parts[1])
       const field = parts[2]
-      const monteurs = db.monteurs.map(m => m.id === monId ? { ...m, [field]: value } : m)
-      const updatedMon = monteurs.find(m => m.id === monId)
-      save({ ...db, monteurs })
-      setSelMons(prev => prev.map(m => m.id === monId ? updatedMon : m))
+      setDb(current => {
+        if (!current) return current
+        const monteurs = current.monteurs.map(m => m.id === monId ? { ...m, [field]: value } : m)
+        const newDb = { ...current, monteurs }
+        dbRef.current = newDb
+        saveData(newDb)
+        setSelMons(prev => prev.map(m => m.id === monId ? monteurs.find(x => x.id === monId) : m))
+        return newDb
+      })
 
     } else if (parts[0] === 'startdatum') {
       setForm(f => ({ ...f, start: value }))
-
     } else if (parts[0] === 'signdate') {
       setForm(f => ({ ...f, signdate: value }))
     }
@@ -469,9 +498,13 @@ function NieuweOvereenkomst({ db, save, toast }) {
     if (!nieuwTbInput.trim()) return
     const nieuwTb = { id: uid(), naam: nieuwTbInput.trim(), functie: 'Tekenbevoegde' }
     // Voeg meteen toe aan de klant in db
-    const klanten = db.klanten.map(k => k.id === selKlant.id ? { ...k, tekenbevoegden: [...k.tekenbevoegden, nieuwTb] } : k)
-    save({ ...db, klanten })
-    setSelKlant(klanten.find(k => k.id === selKlant.id))
+    setDb(current => {
+      const klanten = current.klanten.map(k => k.id === selKlant.id ? { ...k, tekenbevoegden: [...k.tekenbevoegden, nieuwTb] } : k)
+      const newDb = { ...current, klanten }
+      dbRef.current = newDb; saveData(newDb)
+      setSelKlant(klanten.find(k => k.id === selKlant.id))
+      return newDb
+    })
     kiesTekenbevoegde(nieuwTb)
     setNieuwTbInput('')
   }
@@ -515,7 +548,11 @@ function NieuweOvereenkomst({ db, save, toast }) {
       entiteit: ENTS[ent].naam,
       datum: new Date().toLocaleDateString('nl-NL'),
     }
-    save({ ...db, recent: [...(db.recent || []), rec] })
+    setDb(current => {
+      const newDb = { ...current, recent: [...(current.recent || []), rec] }
+      dbRef.current = newDb; saveData(newDb)
+      return newDb
+    })
     setDownloaded(true)
     setDownloading(false)
   }
@@ -564,7 +601,7 @@ function NieuweOvereenkomst({ db, save, toast }) {
     setOntbrekendModal(null)
     toast('Aanvullingen opgeslagen — overeenkomsten worden gegenereerd...')
     setDownloading(true)
-    await downloadOvereenkomsten({ ent, selKlant: updatedKlant, selProj: updatedProj, selMons: updatedMons, form, tarieven, toast })
+    await downloadOvereenkomsten({ ent, selKlant: updatedKlant, selProj: updatedProj, selMons: updatedMons, form, tarieven, toast, db: dbRef.current })
     setDownloading(false)
   }
 
@@ -582,11 +619,10 @@ function NieuweOvereenkomst({ db, save, toast }) {
 
   // ── Bewerkbaar veld component ─────────────────────────────────────────────
   function EditField({ label, value, onChange, multiline, placeholder }) {
-    // Lokale state voor snelle UI-updates terwijl je typt
-    // onBlur slaat op in de database (via updateOv die direct naar db schrijft)
+    // Lokale state zodat typen vloeiend aanvoelt; opslaan naar db gebeurt onBlur
     const [localVal, setLocalVal] = useState(value || '')
-    // Sync als externe value verandert (bijv. bij reset)
-    useState(() => { setLocalVal(value || '') }, [value])
+    // Sync als de externe waarde reset (bijv. nieuwe overeenkomst)
+    useEffect(() => { setLocalVal(value || '') }, [value])
 
     return (
       <div className="ov-field">
@@ -774,12 +810,18 @@ function NieuweOvereenkomst({ db, save, toast }) {
               onBlur={ev => {
                 const waarde = ev.target.value
                 if (waarde !== selProj.omschr) {
-                  const klanten = db.klanten.map(k => {
-                    if (k.id !== selKlant.id) return k
-                    return { ...k, projecten: k.projecten.map(p => p.id === selProj.id ? { ...p, omschr: waarde } : p) }
+                  setDb(current => {
+                    const klanten = current.klanten.map(k => {
+                      if (k.id !== selKlant.id) return k
+                      return { ...k, projecten: k.projecten.map(p => p.id === selProj.id ? { ...p, omschr: waarde } : p) }
+                    })
+                    const newDb = { ...current, klanten }
+                    dbRef.current = newDb; saveData(newDb)
+                    const uk = klanten.find(k => k.id === selKlant.id)
+                    setSelKlant(uk)
+                    setSelProj(uk.projecten.find(p => p.id === selProj.id))
+                    return newDb
                   })
-                  save({ ...db, klanten })
-                  setSelProj({ ...selProj, omschr: waarde })
                 }
               }} />
           </div>
@@ -990,99 +1032,6 @@ function NieuweOvereenkomst({ db, save, toast }) {
     </div>
   )
 }
-
-  async function handleDownload() {
-    setDownloading(true)
-    const result = await validateOvereenkomst({ ent, selKlant, selProj, selMons })
-    if (!result.compleet && result.ontbrekend.length > 0) {
-      setDownloading(false)
-      setOntbrekendModal(result.ontbrekend)
-      setOntbrekendInputs({})
-      return
-    }
-    await downloadOvereenkomsten({ ent, selKlant, selProj, selMons, form, tarieven, toast })
-    setDownloading(false)
-  }
-
-  // Sla de door de gebruiker aangevulde ontbrekende velden permanent op in het
-  // klant-/project-/monteurprofiel, zodat ze de volgende keer niet meer gevraagd worden.
-  async function saveOntbrekendAanvullingen() {
-    let newDb = { ...db }
-    let updatedKlant = selKlant
-    let updatedProj = selProj
-    const updatedMons = [...selMons]
-
-    ontbrekendModal.forEach(item => {
-      const waarde = (ontbrekendInputs[item.veld + '_' + (item.monteur_id || '')] || '').trim()
-      if (!waarde) return
-
-      if (item.veld === 'tekenbevoegde') {
-        // Voeg toe als nieuwe tekenbevoegde aan de klant, en koppel aan het huidige project
-        const nieuweTb = { id: uid(), naam: waarde, functie: 'Tekenbevoegde' }
-        const klanten = newDb.klanten.map(k => {
-          if (k.id !== selKlant.id) return k
-          const tekenbevoegden = [...k.tekenbevoegden, nieuweTb]
-          const projecten = k.projecten.map(p => p.id === selProj.id ? { ...p, tb_id: nieuweTb.id } : p)
-          return { ...k, tekenbevoegden, projecten }
-        })
-        newDb = { ...newDb, klanten }
-        updatedKlant = klanten.find(k => k.id === selKlant.id)
-        updatedProj = updatedKlant.projecten.find(p => p.id === selProj.id)
-      } else if (item.veld.startsWith('klant.')) {
-        const field = item.veld.split('.')[1]
-        const klanten = newDb.klanten.map(k => k.id === selKlant.id ? { ...k, [field]: waarde } : k)
-        newDb = { ...newDb, klanten }
-        updatedKlant = klanten.find(k => k.id === selKlant.id)
-      } else if (item.veld.startsWith('project.')) {
-        const field = item.veld.split('.')[1]
-        const klanten = newDb.klanten.map(k => {
-          if (k.id !== selKlant.id) return k
-          const projecten = k.projecten.map(p => p.id === selProj.id ? { ...p, [field]: waarde } : p)
-          return { ...k, projecten }
-        })
-        newDb = { ...newDb, klanten }
-        updatedKlant = klanten.find(k => k.id === selKlant.id)
-        updatedProj = updatedKlant.projecten.find(p => p.id === selProj.id)
-      } else if (item.veld === 'opdrachtomschrijving') {
-        const klanten = newDb.klanten.map(k => {
-          if (k.id !== selKlant.id) return k
-          const projecten = k.projecten.map(p => p.id === selProj.id ? { ...p, omschr: waarde } : p)
-          return { ...k, projecten }
-        })
-        newDb = { ...newDb, klanten }
-        updatedKlant = klanten.find(k => k.id === selKlant.id)
-        updatedProj = updatedKlant.projecten.find(p => p.id === selProj.id)
-        setForm(f => ({ ...f, omschr: waarde }))
-      } else if (item.veld.startsWith('monteur.')) {
-        const field = item.veld.split('.')[1]
-        const targetField = field === 'persnr' ? (ent === 'west' ? 'persnr_west' : 'persnr_nl') : field
-        const monteurs = newDb.monteurs.map(m => m.id === item.monteur_id ? { ...m, [targetField]: waarde } : m)
-        newDb = { ...newDb, monteurs }
-        const idx = updatedMons.findIndex(m => m.id === item.monteur_id)
-        if (idx >= 0) updatedMons[idx] = monteurs.find(m => m.id === item.monteur_id)
-      }
-    })
-
-    save(newDb)
-    setSelKlant(updatedKlant)
-    setSelProj(updatedProj)
-    setSelMons(updatedMons)
-    setOntbrekendModal(null)
-    toast('Aanvullingen opgeslagen — overeenkomsten worden gegenereerd...')
-
-    // Probeer de download direct opnieuw met de aangevulde gegevens
-    setDownloading(true)
-    await downloadOvereenkomsten({ ent, selKlant: updatedKlant, selProj: updatedProj, selMons: updatedMons, form, tarieven, toast })
-    setDownloading(false)
-  }
-
-  function scrollTop() { topRef.current?.scrollIntoView({ behavior: 'smooth' }) }
-
-  function goStep(n) { setStep(n); scrollTop() }
-
-  function pickKlant(k) { setSelKlant(k); setSelProj(null) }
-  function pickProj(p) { setSelProj(p); setForm(f => ({ ...f, omschr: p.omschr })) }
-
 
 
 // ── PO PREVIEW ────────────────────────────────────────────────────────────
