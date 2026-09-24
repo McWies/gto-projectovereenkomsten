@@ -111,26 +111,6 @@ async function downloadOvereenkomstenMet({ ent, selKlant, selProj, selMons, form
     },
   }
 
-  toast('Server wordt gestart...')
-
-  // Ping de server wakker voor het genereren
-  try {
-    let serverReady = false
-    for (let i = 0; i < 12; i++) {
-      try {
-        const ping = await fetch(`${API_URL}/health`, { method: 'GET', signal: AbortSignal.timeout(8000) })
-        if (ping.ok) { serverReady = true; break }
-      } catch {}
-      await new Promise(r => setTimeout(r, 5000))
-      if (i === 1) toast('Server start op... even geduld')
-      if (i === 4) toast('Bijna klaar...')
-    }
-    if (!serverReady) {
-      toast('Server reageert niet — probeer het over een minuut opnieuw')
-      return
-    }
-  } catch {}
-
   toast('Overeenkomsten worden gegenereerd...')
 
   try {
@@ -138,7 +118,6 @@ async function downloadOvereenkomstenMet({ ent, selKlant, selProj, selMons, form
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(120000),
     })
 
     if (!res.ok) {
@@ -213,9 +192,6 @@ export default function App() {
             <span className="nav-dot" />{lbl}
           </div>
         )}
-        <div style={{ marginTop: 'auto', padding: '12px 16px', fontSize: 10, color: '#aaa', letterSpacing: '0.03em' }}>
-          v1.0.0
-        </div>
       </aside>
 
       <div className="main">
@@ -1500,7 +1476,6 @@ function VoorwaardenScreen({ db, save, toast }) {
   const [editModal, setEditModal] = useState(null)
   const [editValue, setEditValue] = useState('')
   const [editType, setEditType] = useState('numbered')
-  const [conceptLoading, setConceptLoading] = useState(false)
   // Drag state
   const dragArt = useRef(null)
   const dragSub = useRef(null)
@@ -1538,68 +1513,6 @@ function VoorwaardenScreen({ db, save, toast }) {
     })
     save({ ...db, klanten })
     toast('Gepersonaliseerde versie verwijderd')
-  }
-
-  async function downloadConcept() {
-    if (!selTemplate) return
-    setConceptLoading(true)
-    toast('Server wordt gestart... (even geduld)')
-    try {
-      // Stap 1: ping de server wakker en wacht tot hij reageert
-      let serverReady = false
-      for (let poging = 0; poging < 12; poging++) {
-        try {
-          const ping = await fetch(`${API_URL}/health`, { method: 'GET', signal: AbortSignal.timeout(8000) })
-          if (ping.ok) { serverReady = true; break }
-        } catch {}
-        await new Promise(r => setTimeout(r, 5000))
-        if (poging === 1) toast('Server start op... nog even wachten')
-        if (poging === 4) toast('Bijna klaar...')
-      }
-      if (!serverReady) {
-        toast('Server reageert niet — probeer het over een minuut opnieuw')
-        return
-      }
-
-      toast('Concept wordt gegenereerd...')
-
-      // Stap 2: genereer het concept
-      const artikelen = selKlant !== null && heeftOverride
-        ? db.klanten.find(k => k.id === selKlant)?.voorwaarden_override?.[selTemplate] || []
-        : db.standaard_voorwaarden?.[selTemplate] || []
-
-      const res = await fetch(`${API_URL}/concept`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ template_key: selTemplate, artikelen }),
-        signal: AbortSignal.timeout(90000),
-      })
-
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        toast(`Fout (${res.status}): ${err.error || 'concept genereren mislukt'}`)
-        return
-      }
-      const blob = await res.blob()
-      const url = URL.createObjectURL(blob)
-      const a = document.createElement('a')
-      a.href = url
-      const klantNaam = selKlant !== null ? ` - ${db.klanten.find(k => k.id === selKlant)?.naam}` : ''
-      a.download = `${TEMPLATE_LABELS[selTemplate]}${klantNaam} - CONCEPT.pdf`
-      document.body.appendChild(a)
-      a.click()
-      document.body.removeChild(a)
-      URL.revokeObjectURL(url)
-      toast('Concept gedownload ✓')
-    } catch (e) {
-      if (e.name === 'AbortError' || e.name === 'TimeoutError') {
-        toast('Timeout — server te traag, probeer opnieuw')
-      } else {
-        toast(`Fout: ${e.message || 'onbekende fout'}`)
-      }
-    } finally {
-      setConceptLoading(false)
-    }
   }
 
   function saveEdit() {
@@ -1701,18 +1614,6 @@ function VoorwaardenScreen({ db, save, toast }) {
             </div>
           ))}
         </div>
-        {selTemplate && (
-          <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid #f0f0f0', display: 'flex', alignItems: 'center', gap: 10 }}>
-            <button className="btn btn-sm" disabled={conceptLoading} onClick={downloadConcept}
-              style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              {conceptLoading ? '⏳ Genereren...' : '⬇ Download concept PDF'}
-            </button>
-            <span style={{ fontSize: 11, color: '#aaa' }}>
-              Leeg document met alle juridische tekst — zonder klant-/monteurgegevens, met CONCEPT-watermerk
-              {selKlant !== null && heeftOverride && ` (voorwaarden van ${db.klanten.find(k => k.id === selKlant)?.naam})`}
-            </span>
-          </div>
-        )}
       </div>
 
       {/* Klant-override keuze (alleen voor klant-types) */}
