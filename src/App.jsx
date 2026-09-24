@@ -1536,7 +1536,7 @@ function VoorwaardenScreen({ db, save, toast }) {
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
-        toast(`Fout: ${err.error || 'concept genereren mislukt'}`)
+        toast(`Fout (${res.status}): ${err.error || 'concept genereren mislukt'}`)
         return
       }
       const blob = await res.blob()
@@ -1551,7 +1551,7 @@ function VoorwaardenScreen({ db, save, toast }) {
       URL.revokeObjectURL(url)
       toast('Concept gedownload ✓')
     } catch (e) {
-      toast('Kon geen verbinding maken met de generator.')
+      toast(`Verbindingsfout: ${e.message || 'kon generator niet bereiken'}`)
     } finally {
       setConceptLoading(false)
     }
