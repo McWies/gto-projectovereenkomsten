@@ -1522,18 +1522,23 @@ function VoorwaardenScreen({ db, save, toast }) {
   async function downloadConcept() {
     if (!selTemplate) return
     setConceptLoading(true)
-    toast('Concept wordt gegenereerd...')
+    toast('Concept wordt gegenereerd... (eerste keer kan 30-60 sec duren)')
     try {
-      // Gebruik klant-override artikelen als die beschikbaar zijn, anders standaard
       const artikelen = selKlant !== null && heeftOverride
         ? db.klanten.find(k => k.id === selKlant)?.voorwaarden_override?.[selTemplate] || []
         : db.standaard_voorwaarden?.[selTemplate] || []
+
+      const controller = new AbortController()
+      const timeout = setTimeout(() => controller.abort(), 120000) // 2 min timeout
 
       const res = await fetch(`${API_URL}/concept`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ template_key: selTemplate, artikelen }),
+        signal: controller.signal,
       })
+      clearTimeout(timeout)
+
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
         toast(`Fout (${res.status}): ${err.error || 'concept genereren mislukt'}`)
@@ -1551,7 +1556,11 @@ function VoorwaardenScreen({ db, save, toast }) {
       URL.revokeObjectURL(url)
       toast('Concept gedownload ✓')
     } catch (e) {
-      toast(`Verbindingsfout: ${e.message || 'kon generator niet bereiken'}`)
+      if (e.name === 'AbortError') {
+        toast('Server reageert niet — wacht even en probeer opnieuw (server startte op)')
+      } else {
+        toast(`Verbindingsfout: ${e.message || 'kon generator niet bereiken'}`)
+      }
     } finally {
       setConceptLoading(false)
     }
