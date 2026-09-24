@@ -111,6 +111,26 @@ async function downloadOvereenkomstenMet({ ent, selKlant, selProj, selMons, form
     },
   }
 
+  toast('Server wordt gestart...')
+
+  // Ping de server wakker voor het genereren
+  try {
+    let serverReady = false
+    for (let i = 0; i < 12; i++) {
+      try {
+        const ping = await fetch(`${API_URL}/health`, { method: 'GET', signal: AbortSignal.timeout(8000) })
+        if (ping.ok) { serverReady = true; break }
+      } catch {}
+      await new Promise(r => setTimeout(r, 5000))
+      if (i === 1) toast('Server start op... even geduld')
+      if (i === 4) toast('Bijna klaar...')
+    }
+    if (!serverReady) {
+      toast('Server reageert niet — probeer het over een minuut opnieuw')
+      return
+    }
+  } catch {}
+
   toast('Overeenkomsten worden gegenereerd...')
 
   try {
@@ -118,6 +138,7 @@ async function downloadOvereenkomstenMet({ ent, selKlant, selProj, selMons, form
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(120000),
     })
 
     if (!res.ok) {
@@ -1522,22 +1543,37 @@ function VoorwaardenScreen({ db, save, toast }) {
   async function downloadConcept() {
     if (!selTemplate) return
     setConceptLoading(true)
-    toast('Concept wordt gegenereerd... (eerste keer kan 30-60 sec duren)')
+    toast('Server wordt gestart... (even geduld)')
     try {
+      // Stap 1: ping de server wakker en wacht tot hij reageert
+      let serverReady = false
+      for (let poging = 0; poging < 12; poging++) {
+        try {
+          const ping = await fetch(`${API_URL}/health`, { method: 'GET', signal: AbortSignal.timeout(8000) })
+          if (ping.ok) { serverReady = true; break }
+        } catch {}
+        await new Promise(r => setTimeout(r, 5000))
+        if (poging === 1) toast('Server start op... nog even wachten')
+        if (poging === 4) toast('Bijna klaar...')
+      }
+      if (!serverReady) {
+        toast('Server reageert niet — probeer het over een minuut opnieuw')
+        return
+      }
+
+      toast('Concept wordt gegenereerd...')
+
+      // Stap 2: genereer het concept
       const artikelen = selKlant !== null && heeftOverride
         ? db.klanten.find(k => k.id === selKlant)?.voorwaarden_override?.[selTemplate] || []
         : db.standaard_voorwaarden?.[selTemplate] || []
-
-      const controller = new AbortController()
-      const timeout = setTimeout(() => controller.abort(), 120000) // 2 min timeout
 
       const res = await fetch(`${API_URL}/concept`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ template_key: selTemplate, artikelen }),
-        signal: controller.signal,
+        signal: AbortSignal.timeout(90000),
       })
-      clearTimeout(timeout)
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
@@ -1556,10 +1592,10 @@ function VoorwaardenScreen({ db, save, toast }) {
       URL.revokeObjectURL(url)
       toast('Concept gedownload ✓')
     } catch (e) {
-      if (e.name === 'AbortError') {
-        toast('Server reageert niet — wacht even en probeer opnieuw (server startte op)')
+      if (e.name === 'AbortError' || e.name === 'TimeoutError') {
+        toast('Timeout — server te traag, probeer opnieuw')
       } else {
-        toast(`Verbindingsfout: ${e.message || 'kon generator niet bereiken'}`)
+        toast(`Fout: ${e.message || 'onbekende fout'}`)
       }
     } finally {
       setConceptLoading(false)
