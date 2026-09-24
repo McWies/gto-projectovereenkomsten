@@ -1479,6 +1479,7 @@ function VoorwaardenScreen({ db, save, toast }) {
   const [editModal, setEditModal] = useState(null)
   const [editValue, setEditValue] = useState('')
   const [editType, setEditType] = useState('numbered')
+  const [conceptLoading, setConceptLoading] = useState(false)
   // Drag state
   const dragArt = useRef(null)
   const dragSub = useRef(null)
@@ -1516,6 +1517,44 @@ function VoorwaardenScreen({ db, save, toast }) {
     })
     save({ ...db, klanten })
     toast('Gepersonaliseerde versie verwijderd')
+  }
+
+  async function downloadConcept() {
+    if (!selTemplate) return
+    setConceptLoading(true)
+    toast('Concept wordt gegenereerd...')
+    try {
+      // Gebruik klant-override artikelen als die beschikbaar zijn, anders standaard
+      const artikelen = selKlant !== null && heeftOverride
+        ? db.klanten.find(k => k.id === selKlant)?.voorwaarden_override?.[selTemplate] || []
+        : db.standaard_voorwaarden?.[selTemplate] || []
+
+      const res = await fetch(`${API_URL}/concept`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ template_key: selTemplate, artikelen }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        toast(`Fout: ${err.error || 'concept genereren mislukt'}`)
+        return
+      }
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      const klantNaam = selKlant !== null ? ` - ${db.klanten.find(k => k.id === selKlant)?.naam}` : ''
+      a.download = `${TEMPLATE_LABELS[selTemplate]}${klantNaam} - CONCEPT.pdf`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+      toast('Concept gedownload ✓')
+    } catch (e) {
+      toast('Kon geen verbinding maken met de generator.')
+    } finally {
+      setConceptLoading(false)
+    }
   }
 
   function saveEdit() {
@@ -1617,6 +1656,18 @@ function VoorwaardenScreen({ db, save, toast }) {
             </div>
           ))}
         </div>
+        {selTemplate && (
+          <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid #f0f0f0', display: 'flex', alignItems: 'center', gap: 10 }}>
+            <button className="btn btn-sm" disabled={conceptLoading} onClick={downloadConcept}
+              style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              {conceptLoading ? '⏳ Genereren...' : '⬇ Download concept PDF'}
+            </button>
+            <span style={{ fontSize: 11, color: '#aaa' }}>
+              Leeg document met alle juridische tekst — zonder klant-/monteurgegevens, met CONCEPT-watermerk
+              {selKlant !== null && heeftOverride && ` (voorwaarden van ${db.klanten.find(k => k.id === selKlant)?.naam})`}
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Klant-override keuze (alleen voor klant-types) */}
