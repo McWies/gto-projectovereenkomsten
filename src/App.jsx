@@ -111,6 +111,26 @@ async function downloadOvereenkomstenMet({ ent, selKlant, selProj, selMons, form
     },
   }
 
+  toast('Server wordt gestart...')
+
+  // Ping de server wakker voor het genereren
+  try {
+    let serverReady = false
+    for (let i = 0; i < 12; i++) {
+      try {
+        const ping = await fetch(`${API_URL}/health`, { method: 'GET', signal: AbortSignal.timeout(8000) })
+        if (ping.ok) { serverReady = true; break }
+      } catch {}
+      await new Promise(r => setTimeout(r, 5000))
+      if (i === 1) toast('Server start op... even geduld')
+      if (i === 4) toast('Bijna klaar...')
+    }
+    if (!serverReady) {
+      toast('Server reageert niet — probeer het over een minuut opnieuw')
+      return
+    }
+  } catch {}
+
   toast('Overeenkomsten worden gegenereerd...')
 
   try {
@@ -118,6 +138,7 @@ async function downloadOvereenkomstenMet({ ent, selKlant, selProj, selMons, form
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(120000),
     })
 
     if (!res.ok) {
@@ -187,17 +208,20 @@ export default function App() {
           </div>
         )}
         <div className="nav-sec">Beheer</div>
-        {[['monteurs','Monteurs'],['klanten','Klanten & projecten'],['voorwaarden','Voorwaarden'],['instellingen','Instellingen']].map(([id, lbl]) =>
+        {[['monteurs','Monteurs'],['klanten','Klanten & projecten'],['voorwaarden','Voorwaarden'],['datum','Datum aanpassen'],['instellingen','Instellingen']].map(([id, lbl]) =>
           <div key={id} className={`nav-item ${screen === id ? 'active' : ''}`} onClick={() => setScreen(id)}>
             <span className="nav-dot" />{lbl}
           </div>
         )}
+        <div style={{ marginTop: 'auto', padding: '12px 16px', fontSize: 10, color: '#aaa', letterSpacing: '0.03em' }}>
+          v1.0.0
+        </div>
       </aside>
 
       <div className="main">
         <div className="topbar">
           <div>
-            <div className="tb-title">{{ dashboard:'Dashboard', nieuw:'Nieuwe overeenkomst', monteurs:'Monteurs', klanten:'Klanten & projecten', voorwaarden:'Voorwaarden beheren', instellingen:'Instellingen' }[screen]}</div>
+            <div className="tb-title">{{ dashboard:'Dashboard', nieuw:'Nieuwe overeenkomst', monteurs:'Monteurs', klanten:'Klanten & projecten', voorwaarden:'Voorwaarden beheren', datum:'Datum aanpassen', instellingen:'Instellingen' }[screen]}</div>
             <div className="tb-sub">GTO Overeenkomsten Platform</div>
           </div>
           <button className="btn btn-primary btn-sm" onClick={() => setScreen('nieuw')}>+ Nieuwe overeenkomst</button>
@@ -208,6 +232,7 @@ export default function App() {
           {screen === 'monteurs'     && <MonteursScreen db={db} save={save} toast={toast} />}
           {screen === 'klanten'      && <KlantenScreen db={db} save={save} toast={toast} />}
           {screen === 'voorwaarden'   && <VoorwaardenScreen db={db} save={save} toast={toast} />}
+          {screen === 'datum'         && <DatumAanpassenScreen toast={toast} />}
           {screen === 'instellingen' && <InstellingenScreen db={db} save={save} toast={toast} />}
         </div>
       </div>
@@ -1476,6 +1501,7 @@ function VoorwaardenScreen({ db, save, toast }) {
   const [editModal, setEditModal] = useState(null)
   const [editValue, setEditValue] = useState('')
   const [editType, setEditType] = useState('numbered')
+  const [conceptLoading, setConceptLoading] = useState(false)
   // Drag state
   const dragArt = useRef(null)
   const dragSub = useRef(null)
@@ -1513,6 +1539,68 @@ function VoorwaardenScreen({ db, save, toast }) {
     })
     save({ ...db, klanten })
     toast('Gepersonaliseerde versie verwijderd')
+  }
+
+  async function downloadConcept() {
+    if (!selTemplate) return
+    setConceptLoading(true)
+    toast('Server wordt gestart... (even geduld)')
+    try {
+      // Stap 1: ping de server wakker en wacht tot hij reageert
+      let serverReady = false
+      for (let poging = 0; poging < 12; poging++) {
+        try {
+          const ping = await fetch(`${API_URL}/health`, { method: 'GET', signal: AbortSignal.timeout(8000) })
+          if (ping.ok) { serverReady = true; break }
+        } catch {}
+        await new Promise(r => setTimeout(r, 5000))
+        if (poging === 1) toast('Server start op... nog even wachten')
+        if (poging === 4) toast('Bijna klaar...')
+      }
+      if (!serverReady) {
+        toast('Server reageert niet — probeer het over een minuut opnieuw')
+        return
+      }
+
+      toast('Concept wordt gegenereerd...')
+
+      // Stap 2: genereer het concept
+      const artikelen = selKlant !== null && heeftOverride
+        ? db.klanten.find(k => k.id === selKlant)?.voorwaarden_override?.[selTemplate] || []
+        : db.standaard_voorwaarden?.[selTemplate] || []
+
+      const res = await fetch(`${API_URL}/concept`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ template_key: selTemplate, artikelen }),
+        signal: AbortSignal.timeout(90000),
+      })
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        toast(`Fout (${res.status}): ${err.error || 'concept genereren mislukt'}`)
+        return
+      }
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      const klantNaam = selKlant !== null ? ` - ${db.klanten.find(k => k.id === selKlant)?.naam}` : ''
+      a.download = `${TEMPLATE_LABELS[selTemplate]}${klantNaam} - CONCEPT.pdf`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+      toast('Concept gedownload ✓')
+    } catch (e) {
+      if (e.name === 'AbortError' || e.name === 'TimeoutError') {
+        toast('Timeout — server te traag, probeer opnieuw')
+      } else {
+        toast(`Fout: ${e.message || 'onbekende fout'}`)
+      }
+    } finally {
+      setConceptLoading(false)
+    }
   }
 
   function saveEdit() {
@@ -1614,6 +1702,18 @@ function VoorwaardenScreen({ db, save, toast }) {
             </div>
           ))}
         </div>
+        {selTemplate && (
+          <div style={{ marginTop: 12, paddingTop: 12, borderTop: '1px solid #f0f0f0', display: 'flex', alignItems: 'center', gap: 10 }}>
+            <button className="btn btn-sm" disabled={conceptLoading} onClick={downloadConcept}
+              style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              {conceptLoading ? '⏳ Genereren...' : '⬇ Download concept PDF'}
+            </button>
+            <span style={{ fontSize: 11, color: '#aaa' }}>
+              Leeg document met alle juridische tekst — zonder klant-/monteurgegevens, met CONCEPT-watermerk
+              {selKlant !== null && heeftOverride && ` (voorwaarden van ${db.klanten.find(k => k.id === selKlant)?.naam})`}
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Klant-override keuze (alleen voor klant-types) */}
@@ -1805,6 +1905,314 @@ function VoorwaardenScreen({ db, save, toast }) {
     </div>
   )
 }
+
+// ── DATUM AANPASSEN ───────────────────────────────────────────────────────────
+const DATUM_SDT_TYPES = { zzp: 'ZZP', klant: 'Klant' }
+
+function detecteerTemplatetype(bestandsnaam) {
+  const naam = bestandsnaam.toLowerCase()
+  if (/po\s+w?\d+\s+-/i.test(naam)) return 'zzp'
+  return 'klant'
+}
+
+function DatumAanpassenScreen({ toast }) {
+  const [bestanden, setBestanden] = useState([])
+  const [globalStart, setGlobalStart] = useState('')
+  const [globalHandteken, setGlobalHandteken] = useState('')
+  const [verwerken, setVerwerken] = useState(false)
+
+  function voegBestanden(files) {
+    const nieuw = []
+    for (const file of files) {
+      if (!file.name.endsWith('.docx')) continue
+      const type = detecteerTemplatetype(file.name)
+      nieuw.push({ file, naam: file.name, type, nieuweStart: '', nieuweHandteken: '' })
+    }
+    if (!nieuw.length) { toast('Voeg .docx bestanden toe'); return }
+    setBestanden(prev => [...prev, ...nieuw])
+    toast(`${nieuw.length} bestand(en) toegevoegd`)
+  }
+
+  function updateBestand(idx, field, value) {
+    setBestanden(prev => prev.map((b, i) => i === idx ? { ...b, [field]: value } : b))
+  }
+
+  function verwijderBestand(idx) {
+    setBestanden(prev => prev.filter((_, i) => i !== idx))
+  }
+
+  function pasAlleDataToe() {
+    setBestanden(prev => prev.map(b => ({
+      ...b,
+      nieuweStart: globalStart ? nlDatum(globalStart) : b.nieuweStart,
+      nieuweHandteken: globalHandteken ? nlDatum(globalHandteken) : b.nieuweHandteken,
+    })))
+    toast('Datum toegepast op alle bestanden')
+  }
+
+  function nlDatum(iso) {
+    if (!iso) return ''
+    const [y, m, d] = iso.split('-')
+    return `${d}-${m}-${y}`
+  }
+  function isoUitNl(nl) {
+    if (!nl) return ''
+    const [d, m, y] = nl.split('-')
+    return `${y}-${m}-${d}`
+  }
+
+  async function downloadAangepast() {
+    if (!bestanden.length) return
+    setVerwerken(true)
+    toast('Server wordt gestart...')
+    try {
+      // Wake-up ping
+      let serverReady = false
+      for (let i = 0; i < 12; i++) {
+        try {
+          const ping = await fetch(`${API_URL}/health`, { signal: AbortSignal.timeout(8000) })
+          if (ping.ok) { serverReady = true; break }
+        } catch {}
+        await new Promise(r => setTimeout(r, 5000))
+        if (i === 1) toast('Server start op...')
+        if (i === 4) toast('Bijna klaar...')
+      }
+      if (!serverReady) { toast('Server reageert niet — probeer opnieuw'); return }
+
+      toast('Bestanden worden verwerkt...')
+
+      const formData = new FormData()
+      bestanden.forEach((b, n) => {
+        formData.append('files', b.file, b.naam)
+        formData.append(`type_${n}`, b.type)
+        formData.append(`startdatum_${n}`, b.nieuweStart || '')
+        formData.append(`handtekendatum_${n}`, b.nieuweHandteken || '')
+      })
+
+      const res = await fetch(`${API_URL}/datum-aanpassen`, {
+        method: 'POST',
+        body: formData,
+        signal: AbortSignal.timeout(120000),
+      })
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        toast(`Fout (${res.status}): ${err.error || 'verwerken mislukt'}`)
+        return
+      }
+
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `Overeenkomsten_datum_aangepast.zip`
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+      toast('ZIP gedownload ✓')
+    } catch(e) {
+      toast(`Fout: ${e.name === 'TimeoutError' ? 'timeout — probeer opnieuw' : e.message}`)
+    } finally {
+      setVerwerken(false)
+    }
+  }
+
+  return (
+    <div>
+      <div className="card">
+        <div className="card-hdr">Datums aanpassen in bestaande overeenkomsten</div>
+        <p style={{ fontSize: 12, color: '#888', marginBottom: 12 }}>
+          Voeg .docx bestanden toe van bestaande overeenkomsten. Alleen de start- en
+          handtekendatum worden gewijzigd — alle andere inhoud blijft 100% ongewijzigd.
+          Je ontvangt een ZIP met per bestand een Word én PDF.
+        </p>
+
+        {/* Drop zone */}
+        <div
+          style={{ border: '2px dashed #ddd', borderRadius: 8, padding: '28px 16px',
+                   textAlign: 'center', cursor: 'pointer', color: '#aaa', fontSize: 13,
+                   marginBottom: 12, transition: 'border-color 0.15s' }}
+          onDragOver={e => { e.preventDefault(); e.currentTarget.style.borderColor = '#e8651a' }}
+          onDragLeave={e => { e.currentTarget.style.borderColor = '#ddd' }}
+          onDrop={e => { e.preventDefault(); e.currentTarget.style.borderColor = '#ddd'; voegBestanden([...e.dataTransfer.files]) }}
+          onClick={() => document.getElementById('datum-upload').click()}
+        >
+          📄 Sleep .docx bestanden hierheen of klik om te selecteren<br />
+          <span style={{ fontSize: 11 }}>ZZP én Klant overeenkomsten worden beiden herkend</span>
+          <input id="datum-upload" type="file" accept=".docx" multiple style={{ display: 'none' }}
+            onChange={e => voegBestanden([...e.target.files])} />
+        </div>
+
+        {/* Globale datum */}
+        {bestanden.length > 0 && (
+          <div style={{ background: '#f8f8f8', borderRadius: 8, padding: '12px 14px', marginBottom: 4 }}>
+            <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8 }}>
+              📅 Dezelfde datum voor alle {bestanden.length} bestanden toepassen
+            </div>
+            <div className="form-grid-2">
+              <div className="fg">
+                <label className="flbl">Startdatum (voor alle)</label>
+                <input className="finput" type="date" value={globalStart}
+                  onChange={e => setGlobalStart(e.target.value)} />
+              </div>
+              <div className="fg">
+                <label className="flbl">Handtekendatum (voor alle)</label>
+                <input className="finput" type="date" value={globalHandteken}
+                  onChange={e => setGlobalHandteken(e.target.value)} />
+              </div>
+            </div>
+            <button className="btn btn-sm btn-primary" style={{ marginTop: 8 }}
+              onClick={pasAlleDataToe} disabled={!globalStart && !globalHandteken}>
+              Toepassen op alle bestanden
+            </button>
+          </div>
+        )}
+      </div>
+
+      {/* Per bestand */}
+      {bestanden.map((b, idx) => (
+        <div key={idx} className="card">
+          <div className="card-hdr">
+            <span style={{ fontSize: 12, wordBreak: 'break-all' }}>
+              📄 {b.naam}
+              <span className={`badge ${b.type === 'zzp' ? 'badge-nl' : 'badge-west'}`} style={{ marginLeft: 8 }}>
+                {DATUM_SDT_TYPES[b.type]}
+              </span>
+            </span>
+            <button className="btn btn-sm btn-danger" onClick={() => verwijderBestand(idx)}>×</button>
+          </div>
+          <div className="form-grid-2">
+            <div className="fg">
+              <label className="flbl">Startdatum</label>
+              <input className="finput" type="date"
+                value={isoUitNl(b.nieuweStart)}
+                onChange={e => updateBestand(idx, 'nieuweStart', nlDatum(e.target.value))} />
+              {b.nieuweStart && <div style={{ fontSize: 10, color: '#aaa', marginTop: 2 }}>In document: {b.nieuweStart}</div>}
+            </div>
+            <div className="fg">
+              <label className="flbl">Handtekendatum</label>
+              <input className="finput" type="date"
+                value={isoUitNl(b.nieuweHandteken)}
+                onChange={e => updateBestand(idx, 'nieuweHandteken', nlDatum(e.target.value))} />
+              {b.nieuweHandteken && <div style={{ fontSize: 10, color: '#aaa', marginTop: 2 }}>In document: {b.nieuweHandteken}</div>}
+            </div>
+          </div>
+        </div>
+      ))}
+
+      {bestanden.length > 0 && (
+        <div className="card">
+          <button className="btn btn-primary btn-sm" disabled={verwerken} onClick={downloadAangepast}
+            style={{ width: '100%', padding: '10px 0', fontSize: 13 }}>
+            {verwerken ? '⏳ Bezig met verwerken...'
+              : `⬇ Download ZIP met ${bestanden.length} aangepaste overeenkomst(en) (Word + PDF)`}
+          </button>
+          <p style={{ fontSize: 11, color: '#aaa', marginTop: 8, textAlign: 'center' }}>
+            Alleen de datums worden gewijzigd — alle andere inhoud blijft exact gelijk
+          </p>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function detecteerTemplatetype(bestandsnaam) {
+  const naam = bestandsnaam.toLowerCase()
+  // ZZP: bestandsnaam bevat "PO [persnr] -" patroon (persnr vóór klantnaam)
+  // Klant: bestandsnaam bevat "PO [klantnaam] -" patroon (klantnaam vóór persnr)
+  // Detecteer op basis van de volgorde: als er een W of getal direct na "PO " staat = ZZP
+  if (/po\s+\d+\s+-/i.test(naam) || /po\s+w\d+\s+-/i.test(naam)) return 'zzp'
+  return 'klant'
+}
+
+function leesDatumUitDocx(arrayBuffer, sdtIndex) {
+  // Lees de tekst uit een specifiek SDT-blok in de docx XML
+  return new Promise((resolve) => {
+    try {
+      const JSZip = window._JSZip
+      if (!JSZip) { resolve(''); return }
+      JSZip.loadAsync(arrayBuffer).then(zip => {
+        zip.file('word/document.xml').async('string').then(xml => {
+          // Vind het SDT-blok op de opgegeven index
+          const tagRe = /<(\/?)(w:sdt)(\s|>|\/)/g
+          let depth = 0, idx = 0, blockStart = -1
+          let m
+          while ((m = tagRe.exec(xml)) !== null) {
+            const closing = m[1] === '/'
+            if (!closing) {
+              if (depth === 0) blockStart = m.index
+              depth++
+            } else {
+              depth--
+              if (depth === 0 && blockStart >= 0) {
+                if (idx === sdtIndex) {
+                  const closeEnd = xml.indexOf('>', m.index) + 1
+                  const block = xml.slice(blockStart, closeEnd)
+                  const texts = [...block.matchAll(/<w:t[^>]*>([^<]*)<\/w:t>/g)].map(x => x[1])
+                  resolve(texts.join('').trim())
+                  return
+                }
+                idx++
+                blockStart = -1
+              }
+            }
+          }
+          resolve('')
+        }).catch(() => resolve(''))
+      }).catch(() => resolve(''))
+    } catch { resolve('') }
+  })
+}
+
+function pasDatumAanInDocx(arrayBuffer, sdtIndex, nieuweDatum) {
+  // Vervang de tekst in een specifiek SDT-blok, laat de rest 100% ongemoeid
+  return new Promise((resolve, reject) => {
+    try {
+      const JSZip = window._JSZip
+      JSZip.loadAsync(arrayBuffer).then(zip => {
+        zip.file('word/document.xml').async('string').then(xml => {
+          // Vind het SDT-blok op sdtIndex
+          const tagRe = /<(\/?)(w:sdt)(\s|>|\/)/g
+          let depth = 0, idx = 0, blockStart = -1
+          let m
+          while ((m = tagRe.exec(xml)) !== null) {
+            const closing = m[1] === '/'
+            if (!closing) {
+              if (depth === 0) blockStart = m.index
+              depth++
+            } else {
+              depth--
+              if (depth === 0 && blockStart >= 0) {
+                if (idx === sdtIndex) {
+                  const closeEnd = xml.indexOf('>', m.index) + 1
+                  const block = xml.slice(blockStart, closeEnd)
+                  // Vervang alleen de eerste w:t tekst, laat structuur intact
+                  const newBlock = block.replace(
+                    /(<w:t[^>]*>)[^<]*(<\/w:t>)/,
+                    `$1${nieuweDatum}$2`
+                  )
+                  const newXml = xml.slice(0, blockStart) + newBlock + xml.slice(closeEnd)
+                  zip.file('word/document.xml', newXml)
+                  zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' })
+                    .then(resolve).catch(reject)
+                  return
+                }
+                idx++
+                blockStart = -1
+              }
+            }
+          }
+          // Index niet gevonden — geef origineel terug
+          zip.generateAsync({ type: 'arraybuffer', compression: 'DEFLATE' })
+            .then(resolve).catch(reject)
+        })
+      })
+    } catch(e) { reject(e) }
+  })
+}
+
+
 
 function InstellingenScreen({ db, save, toast }) {
   const [ts, setTs] = useState({ ...db.template_settings })
