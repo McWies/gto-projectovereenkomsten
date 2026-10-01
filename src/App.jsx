@@ -1992,12 +1992,22 @@ function DatumAanpassenScreen({ toast }) {
       const res = await fetch(`${API_URL}/datum-aanpassen`, {
         method: 'POST',
         body: formData,
-        signal: AbortSignal.timeout(120000),
+        signal: AbortSignal.timeout(180000), // 3 minuten
       })
 
       if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        toast(`Fout (${res.status}): ${err.error || 'verwerken mislukt'}`)
+        let errMsg = `HTTP ${res.status}`
+        try {
+          const ct = res.headers.get('content-type') || ''
+          if (ct.includes('application/json')) {
+            const err = await res.json()
+            errMsg = err.error || errMsg
+          } else {
+            const txt = await res.text()
+            errMsg = txt.slice(0, 200) || errMsg
+          }
+        } catch {}
+        toast(`Fout: ${errMsg}`)
         return
       }
 
@@ -2012,7 +2022,11 @@ function DatumAanpassenScreen({ toast }) {
       URL.revokeObjectURL(url)
       toast('ZIP gedownload ✓')
     } catch(e) {
-      toast(`Fout: ${e.name === 'TimeoutError' ? 'timeout — probeer opnieuw' : e.message}`)
+      if (e.name === 'TimeoutError' || e.name === 'AbortError') {
+        toast('Timeout (3 min overschreden) — probeer opnieuw, server kan nog aan het opstarten zijn')
+      } else {
+        toast(`Fout: ${e.message || e.name || 'onbekend'}`)
+      }
     } finally {
       setVerwerken(false)
     }
