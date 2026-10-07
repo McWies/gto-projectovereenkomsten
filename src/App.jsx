@@ -138,7 +138,7 @@ async function downloadOvereenkomstenMet({ ent, selKlant, selProj, selMons, form
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
-      signal: AbortSignal.timeout(120000),
+      signal: AbortSignal.timeout(600000), // 10 minuten — voor grote batches (12+ monteurs)
     })
 
     if (!res.ok) {
