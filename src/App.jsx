@@ -755,7 +755,7 @@ function NieuweOvereenkomst({ db, save, toast }) {
           {selMons.map(m => {
             const persnr = getPersnr(m, ent)
             return (
-              <div key={m.id} style={{ background: '#f8f8f8', borderRadius: 6, padding: '10px 12px', marginBottom: 8 }}>
+              <div key={m.id} style={{ background: '#2a2a28', borderRadius: 6, padding: '10px 12px', marginBottom: 8 }}>
                 <div style={{ fontWeight: 600, fontSize: 12, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}>
                   {m.naam} {persnr ? <span className={`badge ${isWestPersnr(persnr) ? 'badge-west' : 'badge-nl'}`}>#{persnr}</span> : <span className="badge badge-afw">Nr ontbreekt</span>}
                 </div>
@@ -820,7 +820,7 @@ function NieuweOvereenkomst({ db, save, toast }) {
         <div>
           <div className="card">
             <div className="card-hdr">Controleer & bewerk — alles wordt automatisch opgeslagen</div>
-            <p style={{ fontSize: 12, color: '#888', marginBottom: 14 }}>
+            <p style={{ fontSize: 12, color: '#a0a09d', marginBottom: 14 }}>
               Pas hier gegevens aan vóór het genereren. Wijzigingen worden direct opgeslagen in het profiel van de betreffende monteur, klant of project — de volgende keer staan ze er al goed in.
             </p>
 
@@ -936,9 +936,9 @@ function NieuweOvereenkomst({ db, save, toast }) {
             </div>
 
             {downloaded && (
-              <div style={{ marginTop: 14, padding: '12px 16px', background: '#e8f3ec', borderRadius: 8,
+              <div style={{ marginTop: 14, padding: '12px 16px', background: '#1a3028', borderRadius: 8,
                             display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
-                <span style={{ fontSize: 13, color: '#2a5a3a', fontWeight: 600 }}>
+                <span style={{ fontSize: 13, color: '#6ecf9a', fontWeight: 600 }}>
                   ✅ Overeenkomsten succesvol gedownload
                 </span>
                 <div style={{ display: 'flex', gap: 8 }}>
@@ -963,7 +963,7 @@ function NieuweOvereenkomst({ db, save, toast }) {
             <div className="modal-bg">
               <div className="modal">
                 <div className="modal-title">⚠ Nog niet alle gegevens ingevuld</div>
-                <p style={{ fontSize: 13, color: '#555', marginBottom: 14 }}>Vul de ontbrekende gegevens in — worden direct opgeslagen.</p>
+                <p style={{ fontSize: 13, color: '#a0a09d', marginBottom: 14 }}>Vul de ontbrekende gegevens in — worden direct opgeslagen.</p>
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10, maxHeight: 360, overflowY: 'auto' }}>
                   {ontbrekendModal.map((item, i) => {
                     const key = item.veld + '_' + (item.monteur_id || '')
@@ -1398,7 +1398,7 @@ function KlantenScreen({ db, save, toast }) {
               {k.projecten.map(p => {
                 const tb = k.tekenbevoegden.find(t => t.id === p.tb_id) || { naam: '—' }
                 return (
-                  <div key={p.id} style={{ background: '#f8f8f8', borderRadius: 6, padding: '8px 10px', marginBottom: 6, border: '1px solid #eee' }}>
+                  <div key={p.id} style={{ background: '#2a2a28', borderRadius: 6, padding: '8px 10px', marginBottom: 6, border: '1px solid #3a3a38' }}>
                     <div style={{ display: 'flex', alignItems: 'flex-start', gap: 8 }}>
                       <div style={{ fontSize: 18 }}>📁</div>
                       <div style={{ flex: 1 }}>
@@ -1745,7 +1745,7 @@ function VoorwaardenScreen({ db, save, toast }) {
             </div>
           )}
           {selKlant !== null && heeftOverride && (
-            <div style={{ marginTop: 8, padding: '8px 12px', background: '#e8f3ec', borderRadius: 6, fontSize: 12, color: '#2a5a3a', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div style={{ marginTop: 8, padding: '8px 12px', background: '#1a3028', borderRadius: 6, fontSize: 12, color: '#6ecf9a', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
               <span>✅ {db.klanten.find(k => k.id === selKlant)?.naam} heeft een gepersonaliseerde versie</span>
               <button className="btn btn-sm btn-danger" onClick={verwijderKlantOverride}>Verwijder</button>
             </div>
@@ -1783,7 +1783,7 @@ function VoorwaardenScreen({ db, save, toast }) {
 
               {/* Artikel header */}
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '8px 12px',
-                            background: '#f8f8f8', userSelect: 'none' }}>
+                            background: '#2a2a28', userSelect: 'none' }}>
                 <span style={{ color: '#ccc', fontSize: 16, cursor: 'grab' }}>☰</span>
                 <span style={{ fontWeight: 700, fontSize: 13, flex: 1, cursor: 'pointer' }}
                   onClick={() => setOpenArtikelen(o => ({ ...o, [art.nr]: !o[art.nr] }))}>
@@ -2060,7 +2060,7 @@ function DatumAanpassenScreen({ toast }) {
 
         {/* Globale datum */}
         {bestanden.length > 0 && (
-          <div style={{ background: '#f8f8f8', borderRadius: 8, padding: '12px 14px', marginBottom: 4 }}>
+          <div style={{ background: '#2a2a28', borderRadius: 8, padding: '12px 14px', marginBottom: 4 }}>
             <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8 }}>
               📅 Dezelfde datum voor alle {bestanden.length} bestanden toepassen
             </div>
