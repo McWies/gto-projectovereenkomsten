@@ -185,6 +185,7 @@ function isWestPersnr(persnr) { return persnr && persnr.toString().startsWith('W
 export default function App() {
   const [db, setDb] = useState(null)
   const [screen, setScreen] = useState('dashboard')
+  const [editRec, setEditRec] = useState(null)
   const [notify, setNotify] = useState('')
 
   useEffect(() => { setDb(getData()) }, [])
@@ -221,14 +222,15 @@ export default function App() {
       <div className="main">
         <div className="topbar">
           <div>
-            <div className="tb-title">{{ dashboard:'Dashboard', nieuw:'Nieuwe overeenkomst', monteurs:'Monteurs', klanten:'Klanten & projecten', voorwaarden:'Voorwaarden beheren', datum:'Datum aanpassen', instellingen:'Instellingen' }[screen]}</div>
+            <div className="tb-title">{{ dashboard:'Dashboard', nieuw:'Nieuwe overeenkomst', transactie:'Transactie bewerken', monteurs:'Monteurs', klanten:'Klanten & projecten', voorwaarden:'Voorwaarden beheren', datum:'Datum aanpassen', instellingen:'Instellingen' }[screen]}</div>
             <div className="tb-sub">GTO Overeenkomsten Platform</div>
           </div>
           <button className="btn btn-primary btn-sm" onClick={() => setScreen('nieuw')}>+ Nieuwe overeenkomst</button>
         </div>
         <div className="content">
-          {screen === 'dashboard'    && <Dashboard db={db} setScreen={setScreen} />}
+          {screen === 'dashboard'    && <Dashboard db={db} save={save} setScreen={setScreen} setEditRec={setEditRec} />}
           {screen === 'nieuw'        && <NieuweOvereenkomst db={db} save={save} toast={toast} />}
+          {screen === 'transactie'   && editRec && <TransactieScreen db={db} save={save} toast={toast} rec={editRec} terug={() => setScreen('dashboard')} />}
           {screen === 'monteurs'     && <MonteursScreen db={db} save={save} toast={toast} />}
           {screen === 'klanten'      && <KlantenScreen db={db} save={save} toast={toast} />}
           {screen === 'voorwaarden'   && <VoorwaardenScreen db={db} save={save} toast={toast} />}
@@ -242,8 +244,21 @@ export default function App() {
 }
 
 // ── DASHBOARD ─────────────────────────────────────────────────────────────
-function Dashboard({ db, setScreen }) {
+function Dashboard({ db, save, setScreen, setEditRec }) {
   const totalProj = db.klanten.reduce((a, k) => a + k.projecten.length, 0)
+
+  function openTransactie(r) {
+    if (!r.snapshot) return // oude records zonder snapshot kunnen niet heropend worden
+    setEditRec(r)
+    setScreen('transactie')
+  }
+
+  function verwijderTransactie(e, id) {
+    e.stopPropagation()
+    if (!window.confirm('Transactie verwijderen uit de lijst?')) return
+    save({ ...db, recent: db.recent.filter(r => r.id !== id) })
+  }
+
   return (
     <div>
       <div className="stat-grid">
@@ -253,16 +268,276 @@ function Dashboard({ db, setScreen }) {
         <div className="stat"><div className="stat-val">{db.recent.length}</div><div className="stat-lbl">Gegenereerd</div></div>
       </div>
       <div className="card">
-        <div className="card-hdr"><span>Recente overeenkomsten</span></div>
+        <div className="card-hdr"><span>Recente overeenkomsten</span><span style={{fontSize:11,color:'var(--text3)',fontWeight:400}}>Klik om te bewerken / opnieuw te genereren</span></div>
         {!db.recent.length
           ? <div className="empty">Nog geen overeenkomsten gegenereerd. <span className="link" onClick={() => setScreen('nieuw')}>Start hier →</span></div>
-          : db.recent.slice(-10).reverse().map(r => (
-            <div key={r.id} className="list-item">
+          : db.recent.slice().reverse().map(r => (
+            <div key={r.id} className={`list-item ${r.snapshot ? 'clickable' : ''}`} onClick={() => openTransactie(r)}
+              style={{display:'flex',alignItems:'center',gap:10,padding:'8px 10px',borderRadius:6,marginBottom:3,border:'1px solid transparent',cursor: r.snapshot ? 'pointer' : 'default'}}>
               <div className="av av-or">{av(r.monteur)}</div>
-              <div className="pinfo"><div className="pname">{r.monteur} — {r.klant}</div><div className="psub">{r.projnr} · {r.entiteit} · {r.datum}</div></div>
+              <div className="pinfo">
+                <div className="pname">{r.monteur} — {r.klant}</div>
+                <div className="psub">{r.projnr} · {r.entiteit} · {r.datum}</div>
+              </div>
+              {r.snapshot
+                ? <span style={{fontSize:11,color:'var(--or)',marginLeft:'auto',flexShrink:0,fontWeight:600}}>✎ Bewerken</span>
+                : <span style={{fontSize:10,color:'var(--text3)',marginLeft:'auto',flexShrink:0}}>— geen snapshot</span>
+              }
+              <button className="btn btn-sm btn-danger" style={{marginLeft:4,padding:'3px 8px',fontSize:11}} onClick={(e) => verwijderTransactie(e, r.id)}>✕</button>
             </div>
           ))
         }
+      </div>
+    </div>
+  )
+}
+
+// ── TRANSACTIE BEWERKEN ───────────────────────────────────────────────────
+// Heropent een eerder gegenereerde overeenkomst direct op het bewerkbare overzicht (stap 5)
+function TransactieScreen({ db, save, toast, rec, terug }) {
+  const snap = rec.snapshot
+  const ent = snap.entiteit
+
+  // Herstel overzicht vanuit snapshot — klant/project/monteurs worden live opgehaald uit db
+  // zodat eventuele latere profielwijzigingen meegenomen worden
+  const liveKlant = db.klanten.find(k => k.id === snap.klant.id) || snap.klant
+  const liveProj = liveKlant?.projecten?.find(p => p.id === snap.project.id) || snap.project
+  const liveMons = snap.monteurs.map(sm => db.monteurs.find(m => m.id === sm.id) || sm)
+
+  const [overzicht, setOverzicht] = useState({
+    entiteit: ent,
+    klant: { ...liveKlant },
+    project: { ...liveProj },
+    tekenbevoegde: snap.tekenbevoegde,
+    monteurs: liveMons.map(m => ({ ...m })),
+    startdatum: snap.startdatum,
+    signdate: snap.signdate,
+    omschr: snap.omschr,
+    tarieven: { ...snap.tarieven },
+  })
+
+  const [tbDropdownOpen, setTbDropdownOpen] = useState(false)
+  const [nieuwTbInput, setNieuwTbInput] = useState('')
+  const [nieuwTbMode, setNieuwTbMode] = useState(false)
+  const [downloading, setDownloading] = useState(false)
+  const [downloaded, setDownloaded] = useState(false)
+
+  const e = ENTS[ent]
+
+  function setTarief(monId, field, val) {
+    setOverzicht(ov => ({ ...ov, tarieven: { ...ov.tarieven, [`${monId}_${field}`]: val } }))
+  }
+
+  function updateOv(path, value) {
+    setOverzicht(ov => {
+      const parts = path.split('.')
+      if (parts.length === 1) return { ...ov, [parts[0]]: value }
+      if (parts.length === 2) return { ...ov, [parts[0]]: { ...ov[parts[0]], [parts[1]]: value } }
+      if (parts[0] === 'monteur') {
+        const [, monId, field] = parts
+        return { ...ov, monteurs: ov.monteurs.map(m => m.id === parseInt(monId) ? { ...m, [field]: value } : m) }
+      }
+      return ov
+    })
+  }
+
+  function kiesTekenbevoegde(tb) { updateOv('tekenbevoegde', tb); setTbDropdownOpen(false); setNieuwTbMode(false) }
+  function voegNieuweTbToe() {
+    if (!nieuwTbInput.trim()) return
+    const nieuwTb = { id: uid(), naam: nieuwTbInput.trim(), functie: 'Tekenbevoegde' }
+    const klanten = db.klanten.map(k => k.id === overzicht.klant.id ? { ...k, tekenbevoegden: [...(k.tekenbevoegden||[]), nieuwTb] } : k)
+    save({ ...db, klanten })
+    kiesTekenbevoegde(nieuwTb)
+    setNieuwTbInput('')
+  }
+
+  async function handleDownload() {
+    setDownloading(true)
+    // Sync gewijzigde gegevens terug naar db-profielen
+    let newDb = { ...db }
+    const klantUpdates = {}
+    ;['naam','adres','kvk','btw','contact','fmail','betaling','opzeg'].forEach(f => { if (overzicht.klant[f] !== undefined) klantUpdates[f] = overzicht.klant[f] })
+    let klanten = newDb.klanten.map(k => k.id === overzicht.klant.id ? { ...k, ...klantUpdates } : k)
+    const projUpdates = { naam: overzicht.project.naam, nr: overzicht.project.nr, werkadres: overzicht.project.werkadres, omschr: overzicht.omschr }
+    if (overzicht.tekenbevoegde) projUpdates.tb_id = overzicht.tekenbevoegde.id
+    klanten = klanten.map(k => { if (k.id !== overzicht.klant.id) return k; const projecten = k.projecten.map(p => p.id === overzicht.project.id ? { ...p, ...projUpdates } : p); return { ...k, projecten } })
+    let monteurs = newDb.monteurs
+    overzicht.monteurs.forEach(om => {
+      const persnrField = ent === 'west' ? 'persnr_west' : 'persnr_nl'
+      const ovPersnr = om[persnrField] || getPersnr(om, ent)
+      monteurs = monteurs.map(m => m.id === om.id ? { ...m, naam: om.naam, handelsnaam: om.handelsnaam, kvk: om.kvk, adres: om.adres, [persnrField]: ovPersnr } : m)
+    })
+    newDb = { ...newDb, klanten, monteurs }
+    const updatedKlant = klanten.find(k => k.id === overzicht.klant.id) || overzicht.klant
+    const updatedProj = updatedKlant?.projecten?.find(p => p.id === overzicht.project.id) || overzicht.project
+    const updatedMons = overzicht.monteurs.map(om => monteurs.find(m => m.id === om.id) || om)
+
+    const tbNaam = overzicht.tekenbevoegde?.naam || ''
+    const form = { start: overzicht.startdatum, signdate: overzicht.signdate, omschr: overzicht.omschr }
+
+    await downloadOvereenkomstenMet({ ent, selKlant: updatedKlant, selProj: updatedProj, selMons: updatedMons, form, tarieven: overzicht.tarieven, tbNaam, toast, db: newDb })
+
+    // Update de snapshot in de bestaande transactie
+    const updatedRec = {
+      ...rec,
+      datum: new Date().toLocaleDateString('nl-NL'),
+      monteur: updatedMons.map(m => m.naam).join(', '),
+      klant: updatedKlant.naam,
+      projnr: `${updatedProj.nr} + ${updatedMons.map(m => getPersnr(m, ent)).join(', ')}`,
+      snapshot: {
+        entiteit: ent,
+        klant: { ...updatedKlant },
+        project: { ...updatedProj },
+        tekenbevoegde: overzicht.tekenbevoegde,
+        monteurs: updatedMons.map(m => ({ ...m })),
+        startdatum: form.start,
+        signdate: form.signdate,
+        omschr: form.omschr,
+        tarieven: { ...overzicht.tarieven },
+      },
+    }
+    const recent = newDb.recent.map(r => r.id === rec.id ? updatedRec : r)
+    save({ ...newDb, recent })
+    setDownloaded(true)
+    setDownloading(false)
+  }
+
+  function EditField({ label, value, onChange, multiline, placeholder }) {
+    const [localVal, setLocalVal] = useState(value || '')
+    return (
+      <div className="ov-field">
+        <div className="ov-label">{label}</div>
+        {multiline
+          ? <textarea className="finput ov-input" rows={2} value={localVal} placeholder={placeholder || label}
+              onChange={ev => setLocalVal(ev.target.value)} onBlur={ev => { if (ev.target.value !== value) onChange(ev.target.value) }} />
+          : <input className="finput ov-input" value={localVal} placeholder={placeholder || label}
+              onChange={ev => setLocalVal(ev.target.value)} onBlur={ev => { if (ev.target.value !== value) onChange(ev.target.value) }} />
+        }
+      </div>
+    )
+  }
+
+  const tbLijst = overzicht.klant.tekenbevoegden || []
+
+  return (
+    <div>
+      <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:14}}>
+        <button className="btn btn-sm" onClick={terug}>← Terug naar dashboard</button>
+        <span style={{fontSize:12,color:'var(--text3)'}}>Transactie van {rec.datum} · {rec.entiteit}</span>
+      </div>
+
+      {downloaded && (
+        <div style={{background:'#1a3028',color:'#6ecf9a',borderRadius:8,padding:'10px 14px',marginBottom:12,fontSize:13}}>
+          ✓ Overeenkomsten opnieuw gedownload. Wijzigingen zijn opgeslagen in de transactie.
+        </div>
+      )}
+
+      {/* Entiteit */}
+      <div className="card">
+        <div className="card-hdr">Entiteit</div>
+        <div style={{fontSize:13,color:'var(--text)'}}>{e.naam}</div>
+        <div style={{fontSize:11,color:'var(--text3)',marginTop:3}}>KvK {e.kvknr} · BTW {e.btwnr}</div>
+      </div>
+
+      {/* Klantgegevens */}
+      <div className="card">
+        <div className="card-hdr">Klant</div>
+        <div className="form-grid-2">
+          <EditField label="Naam" value={overzicht.klant.naam} onChange={v => updateOv('klant.naam', v)} />
+          <EditField label="KvK" value={overzicht.klant.kvk} onChange={v => updateOv('klant.kvk', v)} />
+          <EditField label="Adres" value={overzicht.klant.adres} onChange={v => updateOv('klant.adres', v)} />
+          <EditField label="BTW-nummer" value={overzicht.klant.btw} onChange={v => updateOv('klant.btw', v)} />
+          <EditField label="Contactpersoon" value={overzicht.klant.contact} onChange={v => updateOv('klant.contact', v)} />
+          <EditField label="Factuur e-mail" value={overzicht.klant.fmail} onChange={v => updateOv('klant.fmail', v)} />
+        </div>
+      </div>
+
+      {/* Projectgegevens */}
+      <div className="card">
+        <div className="card-hdr">Project</div>
+        <div className="form-grid-2">
+          <EditField label="Projectnummer" value={overzicht.project.nr} onChange={v => updateOv('project.nr', v)} />
+          <EditField label="Projectnaam" value={overzicht.project.naam} onChange={v => updateOv('project.naam', v)} />
+          <EditField label="Werkadres" value={overzicht.project.werkadres} onChange={v => updateOv('project.werkadres', v)} />
+        </div>
+        <EditField label="Opdrachtomschrijving" value={overzicht.omschr} onChange={v => updateOv('omschr', v)} multiline />
+      </div>
+
+      {/* Tekenbevoegde */}
+      <div className="card">
+        <div className="card-hdr">Tekenbevoegde</div>
+        <div className="ov-field" style={{position:'relative'}}>
+          <div className="ov-label">Naam tekenbevoegde</div>
+          <div className="tb-selector" onClick={() => { setTbDropdownOpen(o => !o); setNieuwTbMode(false) }}>
+            <span>{overzicht.tekenbevoegde?.naam || '— selecteer —'}</span>
+            <span style={{color:'var(--text3)'}}>▾</span>
+          </div>
+          {tbDropdownOpen && (
+            <div className="tb-dropdown">
+              {tbLijst.map(tb => (
+                <div key={tb.id} className="tb-option" onClick={() => kiesTekenbevoegde(tb)}>{tb.naam}</div>
+              ))}
+              {!nieuwTbMode
+                ? <div className="tb-option" style={{color:'var(--or)',fontWeight:600}} onClick={() => setNieuwTbMode(true)}>+ Nieuwe tekenbevoegde toevoegen</div>
+                : <div style={{padding:'6px 10px',display:'flex',gap:6}}>
+                    <input className="finput" style={{fontSize:12}} placeholder="Naam nieuwe tekenbevoegde" value={nieuwTbInput} onChange={e => setNieuwTbInput(e.target.value)} autoFocus />
+                    <button className="btn btn-primary btn-sm" onClick={voegNieuweTbToe}>OK</button>
+                  </div>
+              }
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Datums */}
+      <div className="card">
+        <div className="card-hdr">Datums</div>
+        <div className="form-grid-2">
+          <div className="ov-field">
+            <div className="ov-label">Startdatum</div>
+            <input type="date" className="finput ov-input" value={overzicht.startdatum || ''} onChange={e => updateOv('startdatum', e.target.value)} />
+          </div>
+          <div className="ov-field">
+            <div className="ov-label">Handtekendatum</div>
+            <input type="date" className="finput ov-input" value={overzicht.signdate || ''} onChange={e => updateOv('signdate', e.target.value)} />
+          </div>
+        </div>
+      </div>
+
+      {/* Monteurs & tarieven */}
+      {overzicht.monteurs.map(m => (
+        <div key={m.id} className="card">
+          <div className="card-hdr">{m.naam}</div>
+          <div className="form-grid-2" style={{marginBottom:10}}>
+            <EditField label="Naam" value={m.naam} onChange={v => updateOv(`monteur.${m.id}.naam`, v)} />
+            <EditField label="Handelsnaam" value={m.handelsnaam} onChange={v => updateOv(`monteur.${m.id}.handelsnaam`, v)} />
+            <EditField label="KvK" value={m.kvk} onChange={v => updateOv(`monteur.${m.id}.kvk`, v)} />
+            <EditField label="Adres" value={m.adres} onChange={v => updateOv(`monteur.${m.id}.adres`, v)} />
+            <EditField label={ent === 'west' ? 'Persoonsnummer (West)' : 'Persoonsnummer (NL)'} value={getPersnr(m, ent)} onChange={v => updateOv(`monteur.${m.id}.${ent === 'west' ? 'persnr_west' : 'persnr_nl'}`, v)} />
+          </div>
+          <div className="ov-sectie">Tarieven</div>
+          <div className="form-grid-3" style={{background:'#2a2a28',padding:10,borderRadius:8}}>
+            <div className="fg">
+              <label className="flbl">ZZP-tarief (€/uur)</label>
+              <input className="finput" type="number" value={overzicht.tarieven[`${m.id}_zzp`] || ''} onChange={ev => setTarief(m.id, 'zzp', ev.target.value)} />
+            </div>
+            <div className="fg">
+              <label className="flbl">Klant-tarief (€/uur)</label>
+              <input className="finput" type="number" value={overzicht.tarieven[`${m.id}_kl`] || ''} onChange={ev => setTarief(m.id, 'kl', ev.target.value)} />
+            </div>
+            <div className="fg">
+              <label className="flbl">Reistijd (€/uur)</label>
+              <input className="finput" type="number" value={overzicht.tarieven[`${m.id}_reis`] || ''} onChange={ev => setTarief(m.id, 'reis', ev.target.value)} />
+            </div>
+          </div>
+        </div>
+      ))}
+
+      <div style={{display:'flex',gap:10,marginTop:4,marginBottom:20}}>
+        <button className="btn" onClick={terug}>← Annuleren</button>
+        <button className="btn btn-primary" onClick={handleDownload} disabled={downloading} style={{flex:1}}>
+          {downloading ? '⏳ Genereren...' : '⬇ Overeenkomsten opnieuw genereren'}
+        </button>
       </div>
     </div>
   )
@@ -531,14 +806,27 @@ function NieuweOvereenkomst({ db, save, toast }) {
     // Bouw payload direct hier om de stale tb_id lookup te omzeilen
     await downloadOvereenkomstenMet({ ent, selKlant: updatedSelKlant, selProj: updatedSelProj, selMons: updatedSelMons, form: updatedForm, tarieven: updatedTarieven, tbNaam, toast, db })
 
-    // Sla op in recente overeenkomsten en markeer als gedownload
+    // Sla op in recente overeenkomsten — inclusief volledige snapshot voor herbewerking
     const rec = {
       id: uid(),
       monteur: updatedSelMons.map(m => m.naam).join(', '),
       klant: updatedSelKlant.naam,
       projnr: `${updatedSelProj.nr} + ${updatedSelMons.map(m => getPersnr(m, ent)).join(', ')}`,
       entiteit: ENTS[ent].naam,
+      entKey: ent,
       datum: new Date().toLocaleDateString('nl-NL'),
+      // Volledige snapshot voor heropenen als transactie
+      snapshot: {
+        entiteit: ent,
+        klant: { ...updatedSelKlant },
+        project: { ...updatedSelProj },
+        tekenbevoegde: overzicht?.tekenbevoegde || null,
+        monteurs: updatedSelMons.map(m => ({ ...m })),
+        startdatum: updatedForm.start,
+        signdate: updatedForm.signdate,
+        omschr: updatedForm.omschr,
+        tarieven: { ...updatedTarieven },
+      },
     }
     save({ ...db, recent: [...(db.recent || []), rec] })
     setDownloaded(true)
